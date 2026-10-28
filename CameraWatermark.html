@@ -1,0 +1,250 @@
+<script>
+/**
+ * CameraWatermark.html
+ * Live Stream Controller & Canvas Watermark Burning Engine
+ * Robust, Scaled, Zero-Clipping Audit Stamper
+ */
+
+window.CameraWatermark = (function() {
+  let mediaStream = null;
+
+  /**
+   * Initializes the front-facing camera stream
+   * Robust multi-tier fallback for Android, iOS, Windows & Mac
+   */
+  async function startCamera(videoElement) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("Camera API is not supported by this browser. Please use modern Chrome/Safari.");
+    }
+
+    // Stop existing stream if any
+    stopCamera();
+
+    let stream = null;
+
+    // Tier 1: Front camera (Mobile / Portrait)
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "user" },
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        }
+      });
+    } catch (e1) {
+      console.warn("Front camera constraint failed, falling back to default video device...", e1);
+      // Tier 2: Any video input
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: true
+        });
+      } catch (e2) {
+        console.error("Camera access denied or device unavailable:", e2);
+        AppState.setState(function(s) { s.camera.isStreaming = false; });
+        if (e2.name === 'NotAllowedError' || e2.name === 'PermissionDeniedError') {
+          throw new Error("Camera permission was denied. Please click the lock or camera icon in your browser URL bar and set Camera to 'Allow'.");
+        } else if (e2.name === 'NotReadableError' || e2.name === 'TrackStartError') {
+          throw new Error("Webcam is currently locked. Please close other apps using the camera and retry.");
+        } else if (e2.name === 'NotFoundError' || e2.name === 'DevicesNotFoundError') {
+          throw new Error("No camera hardware found on this device.");
+        } else {
+          throw new Error("Unable to access camera: " + e2.message);
+        }
+      }
+    }
+
+    mediaStream = stream;
+
+    if (videoElement) {
+      videoElement.srcObject = mediaStream;
+      videoElement.setAttribute("playsinline", "true");
+      videoElement.setAttribute("webkit-playsinline", "true");
+      videoElement.muted = true;
+
+      await new Promise(function(resolve) {
+        if (videoElement.readyState >= 2) {
+          resolve();
+        } else {
+          videoElement.onloadedmetadata = function() {
+            resolve();
+          };
+          setTimeout(resolve, 800);
+        }
+      });
+
+      try {
+        const playPromise = videoElement.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+        }
+      } catch (playErr) {
+        console.warn("Autoplay was prevented by browser policy:", playErr);
+      }
+    }
+
+    AppState.setState(function(s) {
+      s.camera.isStreaming = true;
+    });
+
+    return true;
+  }
+
+  /**
+   * Shuts down active camera tracks
+   */
+  function stopCamera() {
+    if (mediaStream) {
+      try {
+        mediaStream.getTracks().forEach(function(track) {
+          track.stop();
+        });
+      } catch (e) {}
+      mediaStream = null;
+    }
+    AppState.setState(function(s) {
+      s.camera.isStreaming = false;
+    });
+  }
+
+  /**
+   * Internal helper: Renders clean, auto-scaled, unclipped audit watermark onto canvas
+   */
+  function renderAuditOverlay(canvas, ctx, width, height, metadata) {
+    const bannerHeight = Math.max(96, Math.floor(height * 0.22));
+    const bannerY = height - bannerHeight;
+    const paddingX = 14;
+    const maxWidth = width - (paddingX * 2);
+
+    // 1. Solid Black Neo-Brutalist Banner
+    ctx.fillStyle = '#09090B';
+    ctx.fillRect(0, bannerY, width, bannerHeight);
+
+    // 2. Neon Acid Mint Accent Strip
+    ctx.fillStyle = '#10B981';
+    ctx.fillRect(0, bannerY, width, 4);
+
+    // 3. Helper to draw dynamically fitted text so nothing ever clips
+    function drawFittedText(text, y, baseSize, color, isBold) {
+      let size = baseSize;
+      ctx.textBaseline = 'top';
+      const weight = isBold ? 'bold ' : '600 ';
+      ctx.font = weight + size + 'px "JetBrains Mono", monospace';
+
+      while (ctx.measureText(text).width > maxWidth && size > 8) {
+        size -= 0.5;
+        ctx.font = weight + size + 'px "JetBrains Mono", monospace';
+      }
+
+      // If still slightly wider than available width, truncate with ellipsis
+      let displayText = text;
+      if (ctx.measureText(displayText).width > maxWidth) {
+        while (displayText.length > 5 && ctx.measureText(displayText + '…').width > maxWidth) {
+          displayText = displayText.slice(0, -1);
+        }
+        displayText += '…';
+      }
+
+      ctx.fillStyle = color;
+      ctx.fillText(displayText, paddingX, y);
+    }
+
+    const baseFontSize = Math.max(10, Math.min(13, Math.floor(bannerHeight * 0.13)));
+    const lineSpacing = Math.max(16, Math.floor(bannerHeight * 0.22));
+    let lineY = bannerY + 9;
+
+    // Line 1: Header / Title
+    const checkLabel = (metadata.checkType === 'CHECK_OUT') ? 'CHECK OUT' : 'CHECK IN';
+    drawFittedText('ATTENDANCE VERIFICATION · ' + checkLabel, lineY, baseFontSize, '#10B981', true);
+    lineY += lineSpacing;
+
+    // Line 2: Identity
+    const emailStr = String(metadata.email || 'ground.staff@workplace.com');
+    const codeStr = String(metadata.employeeCode || 'N/A');
+    drawFittedText('STAFF: ' + emailStr + ' | CODE: ' + codeStr, lineY, baseFontSize, '#FFFFFF', false);
+    lineY += lineSpacing;
+
+    // Line 3: Location / Store
+    const distText = (metadata.distance !== null && metadata.distance !== undefined) ? metadata.distance + 'm' : 'N/A';
+    const storeLabel = String(metadata.storeName || metadata.hubName || 'Mother Hub').replace(/_/g, ' ');
+    const statusText = metadata.isInside ? 'At Store' : 'Outside Store';
+    drawFittedText('STORE: ' + storeLabel + ' · ' + statusText + ' (' + distText + ')', lineY, baseFontSize, '#FFFFFF', false);
+    lineY += lineSpacing;
+
+    // Line 4: Audit Coordinates & Timestamp
+    const latStr = metadata.lat ? metadata.lat.toFixed(5) : '0.00000';
+    const lngStr = metadata.lng ? metadata.lng.toFixed(5) : '0.00000';
+    const accStr = metadata.accuracy ? '±' + Math.round(metadata.accuracy) + 'm' : '±0m';
+    const timeStr = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    drawFittedText('AUDIT: ' + latStr + ', ' + lngStr + ' (' + accStr + ') · ' + timeStr, lineY, baseFontSize, '#FACC15', true);
+  }
+
+  /**
+   * Captures snapshot from live video element
+   */
+  function captureAndWatermark(videoElement, metadata) {
+    if (!videoElement) {
+      throw new Error("Camera frame is not ready. Please ensure camera is active.");
+    }
+
+    const width = videoElement.videoWidth || 640;
+    const height = videoElement.videoHeight || 480;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(videoElement, 0, 0, width, height);
+
+    renderAuditOverlay(canvas, ctx, width, height, metadata);
+
+    const base64Jpeg = canvas.toDataURL('image/jpeg', 0.72);
+    AppState.setState(function(s) {
+      s.camera.watermarkedDataUrl = base64Jpeg;
+      s.camera.isCapturing = false;
+    });
+
+    return base64Jpeg;
+  }
+
+  /**
+   * Watermarks snapshot from an Image/File input (Bypasses GAS iframe webcam restrictions)
+   */
+  function burnWatermarkFromImage(imgElement, metadata) {
+    if (!imgElement) {
+      throw new Error("Image element is not ready.");
+    }
+
+    const width = imgElement.naturalWidth || imgElement.width || 640;
+    const height = imgElement.naturalHeight || imgElement.height || 480;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(imgElement, 0, 0, width, height);
+
+    renderAuditOverlay(canvas, ctx, width, height, metadata);
+
+    const base64Jpeg = canvas.toDataURL('image/jpeg', 0.72);
+    AppState.setState(function(s) {
+      s.camera.watermarkedDataUrl = base64Jpeg;
+      s.camera.isCapturing = false;
+    });
+
+    return base64Jpeg;
+  }
+
+  return {
+    start: startCamera,
+    startCamera: startCamera,
+    stop: stopCamera,
+    stopCamera: stopCamera,
+    captureAndWatermark: captureAndWatermark,
+    burnWatermarkFromImage: burnWatermarkFromImage
+  };
+})();
+</script>

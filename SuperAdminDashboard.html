@@ -1,0 +1,184 @@
+<!-- ==========================================================================
+     SUPER ADMIN DASHBOARD // MASTER CONTROL & GLOBAL MONITORING
+     Strictly for SUPER_ADMIN role (Desktop & Mobile Optimized, Zero Emojis)
+     ========================================================================== -->
+
+<div id="view-super-admin-dashboard" class="hidden">
+  
+  <!-- 1. Top KPI Summary Bar (4 Colorful Neo-Brutalist Metric Tiles) -->
+  <div class="kpi-grid">
+    <div class="kpi-card kpi-amber">
+      <div class="kpi-label">ACTIVE STORES</div>
+      <div id="sa-kpi-stores" class="kpi-value">0</div>
+    </div>
+    <div class="kpi-card kpi-cyan">
+      <div class="kpi-label">STORE ADMINS</div>
+      <div id="sa-kpi-admins" class="kpi-value">0</div>
+    </div>
+    <div class="kpi-card kpi-purple">
+      <div class="kpi-label">TOTAL STAFF</div>
+      <div id="sa-kpi-staff" class="kpi-value">0</div>
+    </div>
+    <div class="kpi-card kpi-mint">
+      <div class="kpi-label">TODAY'S PUNCHES</div>
+      <div id="sa-kpi-punches" class="kpi-value">0</div>
+    </div>
+  </div>
+
+  <!-- 2. Segmented Navigation Bar -->
+  <div class="admin-tab-bar">
+    <button type="button" id="sa-tab-btn-logs" class="admin-tab-btn active" onclick="switchSuperAdminTab('logs')">
+      All Attendance
+    </button>
+    <button type="button" id="sa-tab-btn-stores" class="admin-tab-btn" onclick="switchSuperAdminTab('stores')">
+      Stores & Admins
+    </button>
+    <button type="button" id="sa-tab-btn-users" class="admin-tab-btn" onclick="switchSuperAdminTab('users')">
+      All Users
+    </button>
+  </div>
+
+  <!-- ========================================================================
+       TAB 1: ALL ATTENDANCE (GLOBAL LIVE MONITORING)
+       ======================================================================== -->
+  <div id="sa-tab-logs" class="sa-tab-content">
+    <div class="ui-card">
+      <div class="card-header-row" style="margin-bottom: 0.85rem;">
+        <div>
+          <div class="card-heading">Global Attendance Feed</div>
+          <div class="card-subheading">Live verification stream across all mother hubs</div>
+        </div>
+        <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
+          Refresh
+        </button>
+      </div>
+
+      <!-- Filters Row -->
+      <div class="admin-filter-row">
+        <select id="sa-filter-store" class="ui-select" onchange="applySuperAdminLogsFilter()">
+          <option value="ALL">All Stores</option>
+        </select>
+        <input type="text" id="sa-search-logs" class="ui-input" placeholder="Search staff name or email..." oninput="applySuperAdminLogsFilter()">
+      </div>
+
+      <!-- Logs Feed Container -->
+      <div id="sa-logs-feed" class="card-list" style="margin-top: 0.85rem;">
+        <div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">
+          Loading attendance records...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       TAB 2: STORES & ADMINS (DYNAMIC STORE + ADMIN CRUD - DESKTOP SPLIT LAYOUT)
+       ======================================================================== -->
+  <div id="sa-tab-stores" class="sa-tab-content hidden">
+    <div class="desktop-split-layout">
+      
+      <!-- Left Column: Add New Store Card -->
+      <div class="ui-card">
+        <div class="card-header-row">
+          <div>
+            <div class="card-heading">Add New Store</div>
+            <div class="card-subheading">Create store with geofence and assign Store Admin</div>
+          </div>
+          <button type="button" class="btn-secondary btn-sm" onclick="useCurrentLocationForStoreForm()">
+            Use My Location
+          </button>
+        </div>
+
+        <form id="form-create-store" onsubmit="handleSuperAdminCreateStore(event)">
+          <input type="hidden" id="sa-store-lat">
+          <input type="hidden" id="sa-store-lng">
+
+          <div style="margin-bottom: 0.75rem;">
+            <label class="ui-label" for="sa-store-name">Store Name</label>
+            <input type="text" id="sa-store-name" class="ui-input" placeholder="e.g. Koramangala Hub" required>
+          </div>
+
+          <div style="margin-bottom: 0.75rem;">
+            <label class="ui-label" for="sa-store-location">Location (Coordinates or Google Maps Link)</label>
+            <input type="text" id="sa-store-location" class="ui-input" placeholder="Paste coords: 12.9352, 77.6245 or Maps share link">
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+            <div>
+              <label class="ui-label" for="sa-store-radius">Radius (Meters)</label>
+              <input type="number" id="sa-store-radius" class="ui-input" value="100" min="20" max="500" required>
+            </div>
+            <div>
+              <label class="ui-label" for="sa-admin-name">Admin Name</label>
+              <input type="text" id="sa-admin-name" class="ui-input" placeholder="e.g. Rajesh Kumar">
+            </div>
+          </div>
+
+          <div style="margin-bottom: 0.85rem;">
+            <label class="ui-label" for="sa-admin-email">Assign Store Admin Email</label>
+            <input type="email" id="sa-admin-email" class="ui-input" placeholder="manager@company.com">
+          </div>
+
+          <button type="submit" id="btn-create-store-submit" class="btn-primary">
+            Create Store & Assign Admin
+          </button>
+        </form>
+      </div>
+
+      <!-- Right Column: Active Stores List (Responsive Multi-Column Grid on Desktop) -->
+      <div class="ui-card">
+        <div class="card-header-row">
+          <div>
+            <div class="card-heading">Stores Directory</div>
+            <div class="card-subheading">Manage locations and store managers</div>
+          </div>
+          <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
+            Refresh
+          </button>
+        </div>
+
+        <div id="sa-stores-list" class="card-list grid-responsive">
+          <div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">
+            Loading stores...
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       TAB 3: ALL USERS (GLOBAL DIRECTORY & ROLE MANAGEMENT)
+       ======================================================================== -->
+  <div id="sa-tab-users" class="sa-tab-content hidden">
+    <div class="ui-card">
+      <div class="card-header-row" style="margin-bottom: 0.85rem;">
+        <div>
+          <div class="card-heading">Global Users Directory</div>
+          <div class="card-subheading">Staff, Store Managers & System Administrators</div>
+        </div>
+        <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
+          Refresh
+        </button>
+      </div>
+
+      <!-- User Search & Filter -->
+      <div class="admin-filter-row">
+        <input type="text" id="sa-search-users" class="ui-input" placeholder="Search by name, email or code..." oninput="applySuperAdminUsersFilter()">
+        <select id="sa-filter-user-role" class="ui-select" onchange="applySuperAdminUsersFilter()">
+          <option value="ALL">All Roles</option>
+          <option value="SUPER_ADMIN">SUPER ADMIN</option>
+          <option value="STORE_ADMIN">STORE ADMIN</option>
+          <option value="USER">USER (Staff)</option>
+        </select>
+      </div>
+
+      <!-- Users Responsive Grid -->
+      <div id="sa-users-list" class="card-list grid-responsive" style="margin-top: 0.85rem;">
+        <div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">
+          Loading users...
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>

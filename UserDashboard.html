@@ -1,0 +1,75 @@
+<!-- ==========================================================================
+     USER CHECK-IN UI // GROUND STAFF ATTENDANCE & PERSONAL ACTIVITY ONLY
+     Strictly for USER role (Zero Emojis, Clean Tactile Neo-Brutalism)
+     ========================================================================== -->
+
+<div id="view-user-dashboard" class="hidden">
+  <!-- Unified Focused Check-In Card -->
+  <div class="ui-card">
+    
+    <!-- Header Row inside Card: Auto-Captured Hub Name & Status Badge -->
+    <div class="card-header-row">
+      <div class="card-header-left">
+        <div id="store-title-label" class="card-heading">Locating nearest Hub...</div>
+        <div id="store-subtitle" class="card-subheading">100m verification boundary</div>
+      </div>
+      <span id="location-badge" class="badge-status checking">
+        Checking location...
+      </span>
+    </div>
+
+    <!-- Segmented Check In / Check Out Toggle -->
+    <div class="segmented-toggle">
+      <button type="button" id="toggle-in" class="toggle-option active checkin-active" onclick="setPunchType('CHECK_IN')">
+        Check In
+      </button>
+      <button type="button" id="toggle-out" class="toggle-option" onclick="setPunchType('CHECK_OUT')">
+        Check Out
+      </button>
+    </div>
+
+    <!-- Clean Blueprint Camera Viewport -->
+    <div class="camera-box">
+      <video id="camera-video" autoplay playsinline muted webkit-playsinline class="hidden"></video>
+      <img id="selfie-preview-img" class="hidden" alt="Verification Photo">
+      <input type="file" id="native-camera-input" accept="image/*" capture="user" style="display:none;" onchange="handleNativeCameraCapture(event)">
+      
+      <div id="camera-placeholder" class="camera-placeholder">
+        <div class="camera-placeholder-badge">PHOTO REQUIRED</div>
+        <div class="camera-placeholder-text">Identity verification photo required</div>
+      </div>
+    </div>
+
+    <!-- 1. Take Photo / Retake Photo Button (Sky Cyan) -->
+    <button type="button" id="btn-take-photo" class="btn-photo" onclick="triggerNativeCamera()">
+      Take Photo
+    </button>
+
+    <!-- 2. Primary Proceed Button (Emerald Green when ready) -->
+    <button type="button" id="btn-main-punch" class="btn-proceed" disabled onclick="handleProceedClick()">
+      Proceed to Check In
+    </button>
+
+    <!-- Submission State -->
+    <div id="submission-loader" class="hidden" style="margin-top: 0.75rem; text-align: center; font-size: 0.85rem; font-weight: 700; color: var(--accent-primary);">
+      Verifying location and saving photo...
+    </div>
+
+  </div>
+
+  <!-- Quiet Recent Activity List Below Card -->
+  <div class="ui-card">
+    <div class="card-header-row" style="margin-bottom: 0.75rem; align-items: center;">
+      <div class="card-heading" style="font-size: 0.95rem;">Recent Activity</div>
+      <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
+        Refresh
+      </button>
+    </div>
+
+    <div id="personal-history-list" class="card-list">
+      <div style="text-align: center; padding: 1.25rem; font-size: 0.85rem; color: var(--ink-muted);">
+        No recent attendance recorded.
+      </div>
+    </div>
+  </div>
+</div>

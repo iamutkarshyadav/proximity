@@ -1,0 +1,221 @@
+<script>
+/**
+ * GeoTracker.html
+ * Geolocation Watcher, Drift Smoothing & Device Heuristics
+ * Mother Hub Geofenced Attendance System
+ */
+
+window.GeoTracker = (function() {
+  let watchId = null;
+  const positionBuffer = [];
+  const BUFFER_SIZE = 3;
+
+  /**
+   * Detects whether client is on a Mobile or Laptop/Desktop
+   */
+  function detectDeviceType() {
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const hasTouch = (navigator.maxTouchPoints || 0) > 0;
+    const isSmallScreen = window.innerWidth <= 768;
+    return (isMobileUA || (hasTouch && isSmallScreen)) ? 'MOBILE' : 'LAPTOP';
+  }
+
+  /**
+   * Client-side Haversine Formula for instant distance updates
+   */
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = function(deg) { return (deg * Math.PI) / 180; };
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return Math.round((R * c) * 10) / 10;
+  }
+
+  /**
+   * Median filter to suppress single-frame GPS anomalies
+   */
+  function smoothPosition(pos) {
+    positionBuffer.push({
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude,
+      accuracy: pos.coords.accuracy
+    });
+
+    if (positionBuffer.length > BUFFER_SIZE) {
+      positionBuffer.shift();
+    }
+
+    const sortedLats = positionBuffer.map(function(p) { return p.lat; }).sort(function(a, b) { return a - b; });
+    const sortedLngs = positionBuffer.map(function(p) { return p.lng; }).sort(function(a, b) { return a - b; });
+    const mid = Math.floor(positionBuffer.length / 2);
+
+    return {
+      lat: sortedLats[mid],
+      lng: sortedLngs[mid],
+      accuracy: pos.coords.accuracy
+    };
+  }
+
+  /**
+   * Starts watchPosition tracking with high accuracy
+   */
+  function startTracking() {
+    const device = detectDeviceType();
+
+    if (!navigator.geolocation) {
+      AppState.setState(function(s) {
+        s.geo.status = 'ERROR';
+        s.geo.errorMessage = "Geolocation API is not supported by your browser.";
+      });
+      return;
+    }
+
+    const options = {
+      enableHighAccuracy: true,
+      timeout: 12000,
+      maximumAge: 0
+    };
+
+    AppState.setState(function(s) {
+      s.geo.status = 'LOCKING';
+      s.geo.deviceType = device;
+    });
+
+    try {
+      watchId = navigator.geolocation.watchPosition(
+        handlePositionSuccess,
+        handlePositionError,
+        options
+      );
+    } catch (e) {
+      console.warn("watchPosition failed, falling back to getCurrentPosition:", e);
+      navigator.geolocation.getCurrentPosition(handlePositionSuccess, handlePositionError, options);
+    }
+  }
+
+  function handlePositionSuccess(pos) {
+    const smoothed = smoothPosition(pos);
+    const state = AppState.getState();
+    const stores = state.stores || [];
+
+    let targetHub = null;
+    let minDistance = Infinity;
+
+    // 1. Proximity Auto-Capture: calculate distance to all hubs and pick nearest
+    if (stores.length > 0) {
+      stores.forEach(function(st) {
+        if (st.latitude && st.longitude) {
+          const d = haversine(smoothed.lat, smoothed.lng, st.latitude, st.longitude);
+          if (d < minDistance) {
+            minDistance = d;
+            targetHub = st;
+          }
+        }
+      });
+    }
+
+    if (!targetHub) {
+      targetHub = AppState.getSelectedHub();
+    }
+
+    let distance = null;
+    let isInside = false;
+    let status = 'LOCKING';
+
+    if (targetHub && targetHub.latitude && targetHub.longitude) {
+      distance = haversine(
+        smoothed.lat,
+        smoothed.lng,
+        targetHub.latitude,
+        targetHub.longitude
+      );
+
+      // Laptop tolerance buffer
+      const maxAllowed = targetHub.radiusMeters + (state.geo.deviceType === 'LAPTOP' ? 25 : 0);
+      isInside = distance <= maxAllowed;
+      status = isInside ? 'IN_BOUNDS' : 'OUT_BOUNDS';
+    }
+
+    AppState.setState(function(s) {
+      if (targetHub) {
+        s.selectedStoreId = targetHub.storeId;
+        s.autoCapturedStore = targetHub;
+      }
+      s.geo.lat = smoothed.lat;
+      s.geo.lng = smoothed.lng;
+      s.geo.accuracy = Math.round(smoothed.accuracy);
+      s.geo.distance = distance;
+      s.geo.isInside = isInside;
+      s.geo.status = status;
+      s.geo.lastUpdate = new Date().toLocaleTimeString();
+      s.geo.errorMessage = null;
+    });
+  }
+
+  function handlePositionError(err) {
+    let msg = "GPS Signal Error.";
+    if (err.code === 1) {
+      msg = "Location permission denied. Please allow location access in your browser settings to verify attendance.";
+    } else if (err.code === 2) {
+      msg = "Position unavailable. Please step outdoors or near a window for satellite visibility.";
+    } else if (err.code === 3) {
+      msg = "GPS timeout while locking high accuracy. Retrying automatically...";
+    }
+
+    AppState.setState(function(s) {
+      s.geo.status = 'ERROR';
+      s.geo.errorMessage = msg;
+    });
+  }
+
+  function stopTracking() {
+    if (watchId !== null) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+  }
+
+  function recalc() {
+    const s = AppState.getState();
+    if (s.geo.lat && s.geo.lng && s.stores && s.stores.length > 0) {
+      let targetHub = null;
+      let minDistance = Infinity;
+
+      s.stores.forEach(function(st) {
+        if (st.latitude && st.longitude) {
+          const d = haversine(s.geo.lat, s.geo.lng, st.latitude, st.longitude);
+          if (d < minDistance) {
+            minDistance = d;
+            targetHub = st;
+          }
+        }
+      });
+
+      if (targetHub) {
+        const maxAllowed = targetHub.radiusMeters + (s.geo.deviceType === 'LAPTOP' ? 25 : 0);
+        const inside = minDistance <= maxAllowed;
+        AppState.setState(function(st) {
+          st.selectedStoreId = targetHub.storeId;
+          st.autoCapturedStore = targetHub;
+          st.geo.distance = minDistance;
+          st.geo.isInside = inside;
+          st.geo.status = inside ? 'IN_BOUNDS' : 'OUT_BOUNDS';
+        });
+      }
+    }
+  }
+
+  return {
+    start: startTracking,
+    stop: stopTracking,
+    recalc: recalc,
+    haversine: haversine,
+    detectDeviceType: detectDeviceType
+  };
+})();
+</script>

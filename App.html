@@ -1,0 +1,1627 @@
+<!-- ==========================================================================
+     APP CONTROLLER // STRICT 3-ROLE UI ENGINE & IN-APP PHOTO RENDERING
+     Multi-Store Enterprise Attendance Platform (Desktop & Mobile Optimized, Zero Emojis)
+     ========================================================================== -->
+
+<script>
+/**
+ * Global UI State & Controller Variables
+ */
+var currentCheckType = 'CHECK_IN';
+var capturedSelfieBase64 = null;
+var toastTimer = null;
+
+// Global cached data for Super Admin & Store Admin
+var cachedSuperAdminData = {
+  kpis: null,
+  stores: [],
+  logs: [],
+  allUsers: []
+};
+
+var cachedStoreAdminData = {
+  store: null,
+  kpis: null,
+  logs: [],
+  roster: []
+};
+
+/**
+ * Safe helper to visually format store names by replacing underscores with spaces
+ */
+function formatStoreName(name) {
+  if (!name) return 'Mother Hub';
+  return String(name).replace(/_/g, ' ');
+}
+
+/**
+ * Color-coded auto-dismissing Toast notification (Zero Emojis)
+ */
+function showToast(message, type) {
+  var toastType = type || 'info';
+  var toast = document.getElementById('toast');
+  if (!toast) return;
+
+  if (toastTimer) clearTimeout(toastTimer);
+
+  toast.textContent = message;
+  toast.className = 'toast show ' + toastType;
+
+  toastTimer = setTimeout(function() {
+    toast.className = 'toast';
+    toast.textContent = '';
+  }, 3500);
+}
+
+/**
+ * Hybrid Identity Storage Helpers:
+ * Checks localStorage.getItem('attendance_user_email') and syncs with attend_user_email
+ */
+function getPersistedUserEmail() {
+  return (localStorage.getItem('attendance_user_email') || localStorage.getItem('attend_user_email') || '').trim().toLowerCase();
+}
+
+function setPersistedUserEmail(email) {
+  if (!email) return;
+  var norm = String(email).trim().toLowerCase();
+  localStorage.setItem('attendance_user_email', norm);
+  localStorage.setItem('attend_user_email', norm);
+}
+
+function clearPersistedUserEmail() {
+  localStorage.removeItem('attendance_user_email');
+  localStorage.removeItem('attend_user_email');
+}
+
+function getCurrentUserEmail() {
+  var user = AppState.getState().currentUser;
+  if (user && user.email) return String(user.email).trim().toLowerCase();
+  return getPersistedUserEmail();
+}
+
+/**
+ * Silent Real-Time Multi-Portal Sync Engine
+ * Operates completely in the background without any blinking lights or UI clutter.
+ * Automatically synchronizes backend data every 8 seconds, on window focus,
+ * and immediately after any action (punch in/out, staff creation, store updates).
+ */
+var LiveSync = (function() {
+  var syncIntervalMs = 8000; // 8 seconds for fast, near-instant multi-user sync
+  var syncTimer = null;
+  var isSyncInFlight = false;
+
+  function performSync(onComplete) {
+    if (isSyncInFlight) {
+      if (onComplete) onComplete();
+      return;
+    }
+
+    var state = AppState.getState();
+    if (!state.isInitialized || !state.currentUser) {
+      if (onComplete) onComplete();
+      return;
+    }
+
+    // Pause polling when browser tab is hidden to save mobile battery/bandwidth
+    if (document.hidden && !onComplete) {
+      return;
+    }
+
+    isSyncInFlight = true;
+    var role = state.currentRole;
+    var callerEmail = getCurrentUserEmail();
+
+    if (role === 'SUPER_ADMIN') {
+      google.script.run
+        .withSuccessHandler(function(resp) {
+          isSyncInFlight = false;
+          if (resp && resp.success) {
+            cachedSuperAdminData.kpis = resp.kpis;
+            cachedSuperAdminData.stores = resp.stores || [];
+            cachedSuperAdminData.logs = resp.logs || [];
+            cachedSuperAdminData.allUsers = resp.allUsers || [];
+            renderSuperAdminUI();
+          }
+          if (onComplete) onComplete();
+        })
+        .withFailureHandler(function(err) {
+          isSyncInFlight = false;
+          if (onComplete) onComplete();
+        })
+        .getSuperAdminDashboardData(callerEmail);
+
+    } else if (role === 'STORE_ADMIN') {
+      google.script.run
+        .withSuccessHandler(function(resp) {
+          isSyncInFlight = false;
+          if (resp && resp.success) {
+            cachedStoreAdminData.store = resp.store;
+            cachedStoreAdminData.kpis = resp.kpis;
+            cachedStoreAdminData.logs = resp.logs || [];
+            cachedStoreAdminData.roster = resp.roster || [];
+            renderStoreAdminUI();
+          }
+          if (onComplete) onComplete();
+        })
+        .withFailureHandler(function(err) {
+          isSyncInFlight = false;
+          if (onComplete) onComplete();
+        })
+        .getStoreAdminDashboardData(callerEmail);
+
+    } else if (role === 'USER') {
+      google.script.run
+        .withSuccessHandler(function(resp) {
+          isSyncInFlight = false;
+          if (resp && resp.success) {
+            AppState.setState(function(s) {
+              s.stores = resp.stores || [];
+              s.recentLogs = resp.recentLogs || [];
+            });
+            renderUserUI(AppState.getState());
+          }
+          if (onComplete) onComplete();
+        })
+        .withFailureHandler(function(err) {
+          isSyncInFlight = false;
+          if (onComplete) onComplete();
+        })
+        .getUserDashboardData(callerEmail);
+    } else {
+      isSyncInFlight = false;
+      if (onComplete) onComplete();
+    }
+  }
+
+  function start() {
+    stop();
+    syncTimer = setInterval(function() {
+      performSync();
+    }, syncIntervalMs);
+  }
+
+  function stop() {
+    if (syncTimer) {
+      clearInterval(syncTimer);
+      syncTimer = null;
+    }
+    isSyncInFlight = false;
+  }
+
+  function triggerImmediate() {
+    performSync();
+  }
+
+  // Instant refresh when user returns to this tab or unlocks their phone
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+      performSync();
+    }
+  });
+
+  window.addEventListener('focus', function() {
+    performSync();
+  });
+
+  return {
+    start: start,
+    stop: stop,
+    triggerImmediate: triggerImmediate,
+    syncNow: performSync
+  };
+})();
+
+/**
+ * Bootstrap on DOM ready
+ */
+document.addEventListener('DOMContentLoaded', function() {
+  initApp();
+});
+
+function initApp() {
+  if (window.GeoTracker && window.GeoTracker.detectDeviceType) {
+    AppState.setState(function(s) {
+      s.geo.deviceType = GeoTracker.detectDeviceType();
+    });
+  }
+
+  // Subscribe state changes
+  AppState.subscribe(function(state) {
+    if (state.currentRole === 'USER') {
+      renderUserUI(state);
+    }
+  });
+
+  // Zero-friction boot: pass saved email hint if available
+  var savedEmail = getPersistedUserEmail();
+  reloadSessionData(savedEmail);
+}
+
+/**
+ * Top Bar Refresh button handler: routes refresh action based on active role
+ */
+function handleRefreshCurrentView() {
+  var rBtn = document.getElementById('btn-header-refresh');
+  var origText = rBtn ? rBtn.textContent : 'Refresh';
+  if (rBtn) {
+    rBtn.classList.add('btn-loading');
+    rBtn.disabled = true;
+    rBtn.textContent = 'Refreshing...';
+  }
+
+  function restoreRefreshBtn() {
+    if (rBtn) {
+      rBtn.classList.remove('btn-loading');
+      rBtn.disabled = false;
+      rBtn.textContent = origText || 'Refresh';
+    }
+  }
+
+  LiveSync.syncNow(restoreRefreshBtn);
+}
+
+/**
+ * Reloads session data from GAS backend
+ */
+function reloadSessionData(clientEmail, onComplete) {
+  showLoadingView(true);
+  hideAllDashboards();
+
+  var emailToUse = (clientEmail !== undefined && clientEmail !== null && String(clientEmail).trim())
+    ? String(clientEmail).trim().toLowerCase()
+    : getPersistedUserEmail();
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (onComplete) onComplete();
+      handleInitialData(resp);
+    })
+    .withFailureHandler(function(err) {
+      if (onComplete) onComplete();
+      showLoadingView(false);
+      showToast("Session Error: " + (err.message || err), "error");
+      var viewAuth = document.getElementById('view-auth-prompt');
+      if (viewAuth) viewAuth.classList.remove('hidden');
+    })
+    .getInitialSessionData(emailToUse);
+}
+
+/**
+ * Shows/hides the main initial loading card
+ */
+function showLoadingView(show) {
+  var loader = document.getElementById('view-loading');
+  var headerTitle = document.getElementById('header-store-name');
+  if (loader) {
+    if (show) {
+      loader.classList.remove('hidden');
+      if (headerTitle) headerTitle.textContent = "Connecting";
+    } else {
+      loader.classList.add('hidden');
+    }
+  }
+}
+
+function hideAllDashboards() {
+  var viewAuth = document.getElementById('view-auth-prompt');
+  var viewUser = document.getElementById('view-user-dashboard');
+  var viewStoreAdmin = document.getElementById('view-store-admin-dashboard');
+  var viewSuperAdmin = document.getElementById('view-super-admin-dashboard');
+  var viewDenied = document.getElementById('view-access-denied');
+
+  if (viewAuth) viewAuth.classList.add('hidden');
+  if (viewUser) viewUser.classList.add('hidden');
+  if (viewStoreAdmin) viewStoreAdmin.classList.add('hidden');
+  if (viewSuperAdmin) viewSuperAdmin.classList.add('hidden');
+  if (viewDenied) viewDenied.classList.add('hidden');
+}
+
+/**
+ * Switch from Error Card back to Auth Prompt
+ */
+function showAuthPromptManual() {
+  LiveSync.stop();
+  clearPersistedUserEmail();
+  hideAllDashboards();
+  var headerTitle = document.getElementById('header-store-name');
+  if (headerTitle) headerTitle.textContent = "Workplace Sign In";
+  var viewAuth = document.getElementById('view-auth-prompt');
+  if (viewAuth) viewAuth.classList.remove('hidden');
+  var input = document.getElementById('manual-auth-email');
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
+  var statusMsg = document.getElementById('auth-status-msg');
+  if (statusMsg) {
+    statusMsg.className = 'auth-status-msg hidden';
+    statusMsg.textContent = '';
+  }
+}
+
+/**
+ * Manual Email Sign-In handler (With instant verification against Users sheet)
+ */
+function handleManualAuthSubmit(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  var input = document.getElementById('manual-auth-email');
+  if (!input || !input.value) return;
+
+  var email = input.value.trim().toLowerCase();
+  if (!email || email.indexOf('@') === -1) {
+    showToast("Please enter a valid workplace corporate email.", "error");
+    return;
+  }
+
+  var btn = document.getElementById('btn-manual-auth');
+  var origText = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = "Verifying email...";
+  }
+
+  var statusMsg = document.getElementById('auth-status-msg');
+  if (statusMsg) {
+    statusMsg.className = 'auth-status-msg hidden';
+    statusMsg.textContent = '';
+  }
+
+  showLoadingView(true);
+  hideAllDashboards();
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || "Continue to Dashboard";
+      }
+      showLoadingView(false);
+
+      if (resp && (resp.notRegistered || resp.unauthorized)) {
+        clearPersistedUserEmail();
+        hideAllDashboards();
+        var viewDenied = document.getElementById('view-access-denied');
+        if (viewDenied) viewDenied.classList.remove('hidden');
+        var emailBox = document.getElementById('access-denied-email');
+        if (emailBox) emailBox.textContent = resp.email || email;
+        var msgBox = document.getElementById('access-denied-msg');
+        if (msgBox) msgBox.textContent = resp.message || "Error: Email is not registered in the database.";
+        return;
+      }
+
+      if (resp && resp.success) {
+        var userEmail = resp.user ? resp.user.email.toLowerCase().trim() : email;
+        setPersistedUserEmail(userEmail);
+        handleInitialData(resp);
+        showToast("Signed in as " + userEmail, "success");
+      } else {
+        var viewAuth = document.getElementById('view-auth-prompt');
+        if (viewAuth) viewAuth.classList.remove('hidden');
+        var msg = (resp && resp.message) || "Authentication failed. Please verify email.";
+        if (statusMsg) {
+          statusMsg.textContent = msg;
+          statusMsg.className = 'auth-status-msg show';
+        }
+        showToast(msg, "error");
+      }
+    })
+    .withFailureHandler(function(err) {
+      showLoadingView(false);
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || "Continue to Dashboard";
+      }
+      var viewAuth = document.getElementById('view-auth-prompt');
+      if (viewAuth) viewAuth.classList.remove('hidden');
+      var errText = "Verification error: " + (err.message || err);
+      if (statusMsg) {
+        statusMsg.textContent = errText;
+        statusMsg.className = 'auth-status-msg show';
+      }
+      showToast(errText, "error");
+    })
+    .getInitialSessionData(email);
+}
+
+/**
+ * Main Router: Mounts strictly 1 of the 3 role interfaces
+ */
+function handleInitialData(resp) {
+  showLoadingView(false);
+
+  // If unauthorized / not registered in database -> Show Dedicated Error UI
+  if (resp && (resp.notRegistered || resp.unauthorized)) {
+    LiveSync.stop();
+    clearPersistedUserEmail();
+    hideAllDashboards();
+    var headerTitle = document.getElementById('header-store-name');
+    if (headerTitle) headerTitle.textContent = "Access Denied";
+    var viewDenied = document.getElementById('view-access-denied');
+    if (viewDenied) viewDenied.classList.remove('hidden');
+    var emailBox = document.getElementById('access-denied-email');
+    if (emailBox) emailBox.textContent = resp.email || 'Unregistered Account';
+    var msgBox = document.getElementById('access-denied-msg');
+    if (msgBox) msgBox.textContent = resp.message || "Error: Your email is not registered in the company database.";
+    var emailWrap = document.getElementById('header-user-email-wrap');
+    if (emailWrap) emailWrap.classList.add('hidden');
+    return;
+  }
+
+  // If email is required (first visit on mobile when getActiveUser() is blank and no saved email)
+  if (!resp || resp.requireEmail) {
+    LiveSync.stop();
+    hideAllDashboards();
+    var headerTitle = document.getElementById('header-store-name');
+    if (headerTitle) headerTitle.textContent = "Workplace Sign In";
+    var viewAuth = document.getElementById('view-auth-prompt');
+    if (viewAuth) {
+      viewAuth.classList.remove('hidden');
+      var authInput = document.getElementById('manual-auth-email');
+      if (authInput) authInput.focus();
+    }
+    var appContainer = document.getElementById('app-container');
+    if (appContainer) appContainer.classList.remove('admin-mode');
+
+    var emailWrap = document.getElementById('header-user-email-wrap');
+    if (emailWrap) emailWrap.classList.add('hidden');
+    return;
+  }
+
+  if (!resp.success) {
+    LiveSync.stop();
+    showToast(resp.message || "Failed to authenticate session.", "error");
+    var viewAuth = document.getElementById('view-auth-prompt');
+    if (viewAuth) viewAuth.classList.remove('hidden');
+    return;
+  }
+
+  var role = resp.role || (resp.user && resp.user.role) || 'USER';
+  var userEmail = resp.user ? resp.user.email.toLowerCase().trim() : '';
+
+  // Persist verified email in localStorage for zero-friction future visits
+  if (userEmail) {
+    setPersistedUserEmail(userEmail);
+  }
+
+  AppState.setState(function(s) {
+    s.isInitialized = true;
+    s.isRegistered = true;
+    s.currentUser = resp.user;
+    s.currentRole = role;
+  });
+
+  // Top Bar User Info
+  var emailWrap = document.getElementById('header-user-email-wrap');
+  var emailEl = document.getElementById('header-user-email');
+
+  if (emailWrap && emailEl && userEmail) {
+    emailEl.textContent = userEmail;
+    emailWrap.classList.remove('hidden');
+  }
+
+  hideAllDashboards();
+
+  var appContainer = document.getElementById('app-container');
+  var viewUser = document.getElementById('view-user-dashboard');
+  var viewStoreAdmin = document.getElementById('view-store-admin-dashboard');
+  var viewSuperAdmin = document.getElementById('view-super-admin-dashboard');
+  var headerTitle = document.getElementById('header-store-name');
+
+  // Strict 3-Role View Separation & Desktop Mode Trigger:
+  if (role === 'SUPER_ADMIN') {
+    if (appContainer) appContainer.classList.add('admin-mode');
+    if (viewSuperAdmin) viewSuperAdmin.classList.remove('hidden');
+    if (headerTitle) headerTitle.textContent = "Master Admin";
+
+    cachedSuperAdminData.kpis = resp.kpis;
+    cachedSuperAdminData.stores = resp.stores || [];
+    cachedSuperAdminData.logs = resp.logs || [];
+    cachedSuperAdminData.allUsers = resp.allUsers || [];
+
+    renderSuperAdminUI();
+  } else if (role === 'STORE_ADMIN') {
+    if (appContainer) appContainer.classList.add('admin-mode');
+    if (viewStoreAdmin) viewStoreAdmin.classList.remove('hidden');
+
+    var storeName = resp.store ? formatStoreName(resp.store.storeName) : 'Store';
+    if (headerTitle) headerTitle.textContent = storeName + " Manager";
+
+    cachedStoreAdminData.store = resp.store;
+    cachedStoreAdminData.kpis = resp.kpis;
+    cachedStoreAdminData.logs = resp.logs || [];
+    cachedStoreAdminData.roster = resp.roster || [];
+
+    renderStoreAdminUI();
+  } else {
+    // Ground Staff (USER) - ONLY role that punches attendance
+    if (appContainer) appContainer.classList.remove('admin-mode');
+    if (viewUser) viewUser.classList.remove('hidden');
+
+    AppState.setState(function(s) {
+      s.stores = resp.stores || [];
+      s.recentLogs = resp.recentLogs || [];
+    });
+
+    GeoTracker.start();
+    GeoTracker.recalc();
+    renderUserUI(AppState.getState());
+  }
+
+  // Start silent real-time background sync
+  LiveSync.start();
+}
+
+/* ==========================================================================
+   UI 1: SUPER ADMIN DASHBOARD LOGIC & RENDERING (DESKTOP OPTIMIZED)
+   ========================================================================== */
+
+function switchSuperAdminTab(tabName) {
+  var tabLogs = document.getElementById('sa-tab-logs');
+  var tabStores = document.getElementById('sa-tab-stores');
+  var tabUsers = document.getElementById('sa-tab-users');
+
+  var btnLogs = document.getElementById('sa-tab-btn-logs');
+  var btnStores = document.getElementById('sa-tab-btn-stores');
+  var btnUsers = document.getElementById('sa-tab-btn-users');
+
+  if (tabLogs) tabLogs.classList.add('hidden');
+  if (tabStores) tabStores.classList.add('hidden');
+  if (tabUsers) tabUsers.classList.add('hidden');
+
+  if (btnLogs) btnLogs.classList.remove('active');
+  if (btnStores) btnStores.classList.remove('active');
+  if (btnUsers) btnUsers.classList.remove('active');
+
+  if (tabName === 'stores') {
+    if (tabStores) tabStores.classList.remove('hidden');
+    if (btnStores) btnStores.classList.add('active');
+  } else if (tabName === 'users') {
+    if (tabUsers) tabUsers.classList.remove('hidden');
+    if (btnUsers) btnUsers.classList.add('active');
+  } else {
+    if (tabLogs) tabLogs.classList.remove('hidden');
+    if (btnLogs) btnLogs.classList.add('active');
+  }
+}
+
+function reloadSuperAdminData(onComplete) {
+  var callerEmail = getCurrentUserEmail();
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (onComplete) onComplete();
+      if (resp && resp.success) {
+        cachedSuperAdminData.kpis = resp.kpis;
+        cachedSuperAdminData.stores = resp.stores || [];
+        cachedSuperAdminData.logs = resp.logs || [];
+        cachedSuperAdminData.allUsers = resp.allUsers || [];
+        renderSuperAdminUI();
+        showToast("Super Admin data refreshed.", "success");
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (onComplete) onComplete();
+      showToast("Refresh error: " + (err.message || err), "error");
+    })
+    .getSuperAdminDashboardData(callerEmail);
+}
+
+function renderSuperAdminUI() {
+  // 1. KPI Bar
+  if (cachedSuperAdminData.kpis) {
+    var k = cachedSuperAdminData.kpis;
+    var elStores = document.getElementById('sa-kpi-stores');
+    var elAdmins = document.getElementById('sa-kpi-admins');
+    var elStaff = document.getElementById('sa-kpi-staff');
+    var elPunches = document.getElementById('sa-kpi-punches');
+
+    if (elStores) elStores.textContent = k.totalActiveStores;
+    if (elAdmins) elAdmins.textContent = k.totalStoreAdmins;
+    if (elStaff) elStaff.textContent = k.totalStaff;
+    if (elPunches) elPunches.textContent = k.totalCheckInsToday;
+  }
+
+  // 2. Populate Store Filter Dropdowns
+  var filterStoreSelect = document.getElementById('sa-filter-store');
+  var editUserStoreSelect = document.getElementById('edit-user-store');
+
+  if (filterStoreSelect) {
+    var curVal = filterStoreSelect.value;
+    var html = '<option value="ALL">All Stores</option>';
+    cachedSuperAdminData.stores.forEach(function(s) {
+      html += '<option value="' + s.storeId + '">' + formatStoreName(s.storeName) + '</option>';
+    });
+    filterStoreSelect.innerHTML = html;
+    filterStoreSelect.value = curVal || 'ALL';
+  }
+
+  if (editUserStoreSelect) {
+    var uHtml = '<option value="">None / Unassigned</option>';
+    cachedSuperAdminData.stores.forEach(function(s) {
+      uHtml += '<option value="' + s.storeId + '">' + formatStoreName(s.storeName) + '</option>';
+    });
+    editUserStoreSelect.innerHTML = uHtml;
+  }
+
+  // 3. Render Logs Feed
+  applySuperAdminLogsFilter();
+
+  // 4. Render Active Stores List
+  renderSuperAdminStoresList();
+
+  // 5. Render All Users Directory
+  applySuperAdminUsersFilter();
+}
+
+function applySuperAdminLogsFilter() {
+  var feedEl = document.getElementById('sa-logs-feed');
+  var storeFilter = document.getElementById('sa-filter-store') ? document.getElementById('sa-filter-store').value : 'ALL';
+  var searchFilter = document.getElementById('sa-search-logs') ? document.getElementById('sa-search-logs').value.trim().toLowerCase() : '';
+
+  if (!feedEl) return;
+
+  var logs = cachedSuperAdminData.logs || [];
+  var filtered = logs.filter(function(log) {
+    var matchStore = (storeFilter === 'ALL' || log.storeId === storeFilter);
+    var matchSearch = !searchFilter || 
+      (log.fullName && log.fullName.toLowerCase().indexOf(searchFilter) > -1) ||
+      (log.email && log.email.toLowerCase().indexOf(searchFilter) > -1) ||
+      (log.storeName && log.storeName.toLowerCase().indexOf(searchFilter) > -1);
+    return matchStore && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    feedEl.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No attendance records found.</div>';
+    return;
+  }
+
+  var html = '';
+  filtered.forEach(function(log) {
+    var isCheckIn = (log.checkType === 'CHECK_IN');
+    var badgeClass = isCheckIn ? 'inside' : 'checking';
+    var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
+    var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+
+    var dateObj = new Date(log.timestamp);
+    var timeFormatted = !isNaN(dateObj.getTime())
+      ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : log.timestamp;
+
+    var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm away' : '';
+    var displayStore = formatStoreName(log.storeName || 'Mother Hub');
+    var staffName = log.fullName || log.email.split('@')[0];
+
+    html += 
+      '<div class="activity-card-item attendance-strip ' + itemCardClass + '">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name"><strong>' + staffName + '</strong> · ' + displayStore + '</div>' +
+          '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+        '</div>' +
+        '<div class="activity-row-bottom">' +
+          '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
+          (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + staffName + ' · ' + badgeText + '\')">View Photo</button>' : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  feedEl.innerHTML = html;
+}
+
+function renderSuperAdminStoresList() {
+  var listEl = document.getElementById('sa-stores-list');
+  if (!listEl) return;
+
+  var stores = cachedSuperAdminData.stores || [];
+  if (stores.length === 0) {
+    listEl.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">No stores registered yet.</div>';
+    return;
+  }
+
+  var html = '';
+  stores.forEach(function(s) {
+    var isInactive = (s.status === 'INACTIVE');
+    var statusClass = isInactive ? 'outside' : 'inside';
+    var statusText = isInactive ? 'INACTIVE' : 'ACTIVE';
+    var adminInfo = s.primaryAdminEmail ? s.primaryAdminEmail : 'Unassigned';
+
+    html += 
+      '<div class="activity-card-item" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name"><strong>' + formatStoreName(s.storeName) + '</strong> (' + s.storeId + ')</div>' +
+          '<span class="badge-status ' + statusClass + '">' + statusText + '</span>' +
+        '</div>' +
+        '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.5rem; line-height: 1.4;">' +
+          'Coords: ' + s.latitude.toFixed(4) + ', ' + s.longitude.toFixed(4) + ' · Radius: ' + s.radiusMeters + 'm<br>' +
+          'Manager: <strong>' + adminInfo + '</strong>' +
+        '</div>' +
+        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end;">' +
+          '<button type="button" class="btn-secondary btn-sm" onclick="openChangeAdminModal(\'' + s.storeId + '\', \'' + formatStoreName(s.storeName) + '\')">Assign Manager</button>' +
+          (!isInactive ? '<button type="button" class="btn-danger btn-sm" onclick="handleDeactivateStore(\'' + s.storeId + '\', \'' + formatStoreName(s.storeName) + '\')">Deactivate</button>' : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+function applySuperAdminUsersFilter() {
+  var listEl = document.getElementById('sa-users-list');
+  var roleFilter = document.getElementById('sa-filter-user-role') ? document.getElementById('sa-filter-user-role').value : 'ALL';
+  var searchFilter = document.getElementById('sa-search-users') ? document.getElementById('sa-search-users').value.trim().toLowerCase() : '';
+
+  if (!listEl) return;
+
+  var users = cachedSuperAdminData.allUsers || [];
+  var filtered = users.filter(function(u) {
+    var matchRole = (roleFilter === 'ALL' || u.role === roleFilter);
+    var matchSearch = !searchFilter ||
+      (u.fullName && u.fullName.toLowerCase().indexOf(searchFilter) > -1) ||
+      (u.email && u.email.toLowerCase().indexOf(searchFilter) > -1) ||
+      (u.employeeCode && u.employeeCode.toLowerCase().indexOf(searchFilter) > -1);
+    return matchRole && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">No users found.</div>';
+    return;
+  }
+
+  var html = '';
+  filtered.forEach(function(u) {
+    var roleBadge = (u.role === 'SUPER_ADMIN') ? '<span class="badge-role badge-role-super">SUPER ADMIN</span>'
+      : (u.role === 'STORE_ADMIN') ? '<span class="badge-role badge-role-mgr">STORE ADMIN</span>'
+      : '<span class="badge-role badge-role-user">STAFF</span>';
+
+    var store = cachedSuperAdminData.stores.find(function(s) { return s.storeId === u.assignedStoreId; });
+    var storeName = store ? formatStoreName(store.storeName) : (u.assignedStoreId || 'Unassigned');
+
+    html += 
+      '<div class="activity-card-item" style="background: #FFFFFF;">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name"><strong>' + (u.fullName || 'User') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + (u.employeeCode || 'N/A') + ')</span></div>' +
+          roleBadge +
+        '</div>' +
+        '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.4rem; line-height: 1.4;">' +
+          'Email: ' + u.email + '<br>' +
+          'Store: <strong>' + storeName + '</strong> · Status: <strong>' + u.status + '</strong>' +
+        '</div>' +
+        '<div style="display: flex; justify-content: flex-end;">' +
+          '<button type="button" class="btn-secondary btn-sm" onclick="openEditUserModal(\'' + u.email + '\')">Edit Access</button>' +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+/**
+ * Super Admin: Use GPS for Add Store Form
+ */
+function useCurrentLocationForStoreForm() {
+  if (!navigator.geolocation) {
+    showToast("Geolocation not supported.", "error");
+    return;
+  }
+  showToast("Getting current GPS location...", "info");
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    var lat = pos.coords.latitude;
+    var lng = pos.coords.longitude;
+    var latEl = document.getElementById('sa-store-lat');
+    var lngEl = document.getElementById('sa-store-lng');
+    var locEl = document.getElementById('sa-store-location');
+
+    if (latEl) latEl.value = lat;
+    if (lngEl) lngEl.value = lng;
+    if (locEl) locEl.value = lat.toFixed(5) + ", " + lng.toFixed(5);
+    showToast("GPS coordinates set.", "success");
+  }, function(err) {
+    showToast("Location error: " + err.message, "error");
+  }, { enableHighAccuracy: true });
+}
+
+/**
+ * Super Admin: Create Store Form Submit
+ */
+function handleSuperAdminCreateStore(e) {
+  e.preventDefault();
+  var nameEl = document.getElementById('sa-store-name');
+  var locEl = document.getElementById('sa-store-location');
+  var latEl = document.getElementById('sa-store-lat');
+  var lngEl = document.getElementById('sa-store-lng');
+  var radEl = document.getElementById('sa-store-radius');
+  var admEl = document.getElementById('sa-admin-email');
+  var admNameEl = document.getElementById('sa-admin-name');
+  var btn = document.getElementById('btn-create-store-submit');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Creating Store...';
+  }
+
+  var payload = {
+    callerEmail: callerEmail,
+    storeName: nameEl ? nameEl.value : '',
+    locationInput: locEl ? locEl.value : '',
+    latitude: latEl ? latEl.value : '',
+    longitude: lngEl ? lngEl.value : '',
+    radiusMeters: radEl ? radEl.value : 100,
+    adminEmail: admEl ? admEl.value : '',
+    adminName: admNameEl ? admNameEl.value : ''
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Create Store & Assign Admin';
+      }
+      if (resp && resp.success) {
+        showToast("Store created successfully.", "success");
+        if (nameEl) nameEl.value = '';
+        if (locEl) locEl.value = '';
+        if (admEl) admEl.value = '';
+        if (admNameEl) admNameEl.value = '';
+        cachedSuperAdminData.kpis = resp.kpis;
+        cachedSuperAdminData.stores = resp.stores || [];
+        cachedSuperAdminData.logs = resp.logs || [];
+        cachedSuperAdminData.allUsers = resp.allUsers || [];
+        renderSuperAdminUI();
+        LiveSync.triggerImmediate();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Create Store & Assign Admin';
+      }
+      showToast("Store creation error: " + (err.message || err), "error");
+    })
+    .createStoreAndAdmin(payload);
+}
+
+/**
+ * Super Admin: Deactivate Store
+ */
+function handleDeactivateStore(storeId, storeName) {
+  if (!confirm("Are you sure you want to deactivate " + storeName + "?")) return;
+  var callerEmail = getCurrentUserEmail();
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (resp && resp.success) {
+        showToast(storeName + " deactivated.", "success");
+        cachedSuperAdminData.kpis = resp.kpis;
+        cachedSuperAdminData.stores = resp.stores || [];
+        renderSuperAdminUI();
+        LiveSync.triggerImmediate();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Deactivate error: " + (err.message || err), "error");
+    })
+    .deactivateStore({ storeId: storeId, callerEmail: callerEmail });
+}
+
+/**
+ * Super Admin: Change Store Admin Modal
+ */
+function openChangeAdminModal(storeId, storeName) {
+  var modal = document.getElementById('modal-change-admin');
+  var titleEl = document.getElementById('change-admin-store-title');
+  var storeIdInput = document.getElementById('change-admin-store-id');
+  var emailInput = document.getElementById('change-admin-email');
+  var nameInput = document.getElementById('change-admin-name');
+
+  if (titleEl) titleEl.textContent = "Assign Manager for " + storeName;
+  if (storeIdInput) storeIdInput.value = storeId;
+  if (emailInput) emailInput.value = '';
+  if (nameInput) nameInput.value = '';
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeChangeAdminModal() {
+  var modal = document.getElementById('modal-change-admin');
+  if (modal) modal.classList.add('hidden');
+}
+
+function handleSuperAdminSubmitChangeAdmin(e) {
+  e.preventDefault();
+  var storeId = document.getElementById('change-admin-store-id').value;
+  var email = document.getElementById('change-admin-email').value;
+  var name = document.getElementById('change-admin-name').value;
+  var btn = document.getElementById('btn-save-change-admin');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Assigning Manager...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Assign Manager';
+      }
+      closeChangeAdminModal();
+      showToast("Store Manager updated.", "success");
+      reloadSuperAdminData();
+      LiveSync.triggerImmediate();
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Assign Manager';
+      }
+      showToast("Update error: " + (err.message || err), "error");
+    })
+    .changeStoreAdmin({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      newAdminEmail: email,
+      fullName: name
+    });
+}
+
+/**
+ * Super Admin: Edit User Modal
+ */
+function openEditUserModal(userEmail) {
+  var user = cachedSuperAdminData.allUsers.find(function(u) { return u.email === userEmail; });
+  if (!user) return;
+
+  var modal = document.getElementById('modal-edit-user');
+  var emailInput = document.getElementById('edit-user-email');
+  var displayEmail = document.getElementById('edit-user-display-email');
+  var roleSelect = document.getElementById('edit-user-role');
+  var storeSelect = document.getElementById('edit-user-store');
+  var statusSelect = document.getElementById('edit-user-status');
+
+  if (emailInput) emailInput.value = user.email;
+  if (displayEmail) displayEmail.textContent = user.fullName ? user.fullName + ' (' + user.email + ')' : user.email;
+  if (roleSelect) roleSelect.value = user.role || 'USER';
+  if (storeSelect) storeSelect.value = user.assignedStoreId || '';
+  if (statusSelect) statusSelect.value = user.status || 'ACTIVE';
+
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeEditUserModal() {
+  var modal = document.getElementById('modal-edit-user');
+  if (modal) modal.classList.add('hidden');
+}
+
+function handleSuperAdminSubmitEditUser(e) {
+  e.preventDefault();
+  var email = document.getElementById('edit-user-email').value;
+  var role = document.getElementById('edit-user-role').value;
+  var storeId = document.getElementById('edit-user-store').value;
+  var status = document.getElementById('edit-user-status').value;
+  var btn = document.getElementById('btn-save-edit-user');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Saving Changes...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Save Changes';
+      }
+      closeEditUserModal();
+      showToast("User access updated.", "success");
+      reloadSuperAdminData();
+      LiveSync.triggerImmediate();
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Save Changes';
+      }
+      showToast("Update error: " + (err.message || err), "error");
+    })
+    .updateUserRoleOrStore({
+      callerEmail: callerEmail,
+      email: email,
+      role: role,
+      assignedStoreId: storeId,
+      status: status
+    });
+}
+
+/* ==========================================================================
+   UI 2: STORE ADMIN DASHBOARD LOGIC & RENDERING (DESKTOP OPTIMIZED)
+   ========================================================================== */
+
+function switchStoreAdminTab(tabName) {
+  var tabLogs = document.getElementById('mgr-tab-logs');
+  var tabStaff = document.getElementById('mgr-tab-staff');
+  var btnLogs = document.getElementById('mgr-tab-btn-logs');
+  var btnStaff = document.getElementById('mgr-tab-btn-staff');
+
+  if (tabLogs) tabLogs.classList.add('hidden');
+  if (tabStaff) tabStaff.classList.add('hidden');
+  if (btnLogs) btnLogs.classList.remove('active');
+  if (btnStaff) btnStaff.classList.remove('active');
+
+  if (tabName === 'staff') {
+    if (tabStaff) tabStaff.classList.remove('hidden');
+    if (btnStaff) btnStaff.classList.add('active');
+  } else {
+    if (tabLogs) tabLogs.classList.remove('hidden');
+    if (btnLogs) btnLogs.classList.add('active');
+  }
+}
+
+function reloadStoreAdminData(onComplete) {
+  var callerEmail = getCurrentUserEmail();
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (onComplete) onComplete();
+      if (resp && resp.success) {
+        cachedStoreAdminData.store = resp.store;
+        cachedStoreAdminData.kpis = resp.kpis;
+        cachedStoreAdminData.logs = resp.logs || [];
+        cachedStoreAdminData.roster = resp.roster || [];
+        renderStoreAdminUI();
+        showToast("Store data refreshed.", "success");
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (onComplete) onComplete();
+      showToast("Refresh error: " + (err.message || err), "error");
+    })
+    .getStoreAdminDashboardData(callerEmail);
+}
+
+function renderStoreAdminUI() {
+  var store = cachedStoreAdminData.store;
+  var bannerName = document.getElementById('mgr-banner-store-name');
+  var bannerSub = document.getElementById('mgr-banner-store-radius');
+
+  if (bannerName) {
+    bannerName.textContent = store ? formatStoreName(store.storeName) : 'Assigned Mother Hub';
+  }
+  if (bannerSub && store) {
+    bannerSub.textContent = store.radiusMeters + 'm geofence verification boundary';
+  }
+
+  // KPIs
+  if (cachedStoreAdminData.kpis) {
+    var k = cachedStoreAdminData.kpis;
+    var elIn = document.getElementById('mgr-kpi-in');
+    var elOut = document.getElementById('mgr-kpi-out');
+    var elStaff = document.getElementById('mgr-kpi-staff');
+
+    if (elIn) elIn.textContent = k.checkedInToday;
+    if (elOut) elOut.textContent = k.checkedOutToday;
+    if (elStaff) elStaff.textContent = k.totalStoreStaff;
+  }
+
+  // Attendance Logs Feed (strictly for this store)
+  var logsFeed = document.getElementById('mgr-logs-feed');
+  if (logsFeed) {
+    var logs = cachedStoreAdminData.logs || [];
+    if (logs.length === 0) {
+      logsFeed.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No attendance recorded for this store today.</div>';
+    } else {
+      var html = '';
+      logs.forEach(function(log) {
+        var isCheckIn = (log.checkType === 'CHECK_IN');
+        var badgeClass = isCheckIn ? 'inside' : 'checking';
+        var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
+        var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+
+        var dateObj = new Date(log.timestamp);
+        var timeFormatted = !isNaN(dateObj.getTime())
+          ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : log.timestamp;
+
+        var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm' : '';
+        var staffName = log.fullName || log.email.split('@')[0];
+
+        html += 
+          '<div class="activity-card-item attendance-strip ' + itemCardClass + '">' +
+            '<div class="activity-row-top">' +
+              '<div class="activity-store-name"><strong>' + staffName + '</strong></div>' +
+              '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+            '</div>' +
+            '<div class="activity-row-bottom">' +
+              '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
+              (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + staffName + ' · ' + badgeText + '\')">View Photo</button>' : '') +
+            '</div>' +
+          '</div>';
+      });
+      logsFeed.innerHTML = html;
+    }
+  }
+
+  // Store Roster List
+  var rosterList = document.getElementById('mgr-staff-list');
+  if (rosterList) {
+    var roster = cachedStoreAdminData.roster || [];
+    if (roster.length === 0) {
+      rosterList.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">No staff assigned to this store yet.</div>';
+    } else {
+      var rHtml = '';
+      roster.forEach(function(u) {
+        var isInactive = (u.status === 'INACTIVE');
+        rHtml += 
+          '<div class="activity-card-item" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
+            '<div class="activity-row-top">' +
+              '<div class="activity-store-name"><strong>' + (u.fullName || 'Staff') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + (u.employeeCode || 'N/A') + ')</span></div>' +
+              '<span class="badge-status ' + (isInactive ? 'outside' : 'inside') + '">' + (u.status || 'ACTIVE') + '</span>' +
+            '</div>' +
+            '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.4rem;">' +
+              'Email: ' + u.email +
+            '</div>' +
+            (!isInactive ? '<div style="display: flex; justify-content: flex-end;"><button type="button" class="btn-danger btn-sm" onclick="handleStoreAdminRemoveStaff(\'' + u.email + '\', \'' + (u.fullName || u.email) + '\')">Remove from Store</button></div>' : '') +
+          '</div>';
+      });
+      rosterList.innerHTML = rHtml;
+    }
+  }
+}
+
+/**
+ * Store Admin: Add Staff Form Submit
+ */
+function handleStoreAdminAddStaff(e) {
+  e.preventDefault();
+  var emailEl = document.getElementById('mgr-staff-email');
+  var nameEl = document.getElementById('mgr-staff-name');
+  var codeEl = document.getElementById('mgr-staff-code');
+  var btn = document.getElementById('btn-mgr-add-staff-submit');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Adding Staff...';
+  }
+
+  var payload = {
+    callerEmail: callerEmail,
+    email: emailEl ? emailEl.value : '',
+    fullName: nameEl ? nameEl.value : '',
+    employeeCode: codeEl ? codeEl.value : ''
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add Staff to Store';
+      }
+      if (resp && resp.success) {
+        showToast("Staff added to store.", "success");
+        if (emailEl) emailEl.value = '';
+        if (nameEl) nameEl.value = '';
+        if (codeEl) codeEl.value = '';
+        cachedStoreAdminData.store = resp.store;
+        cachedStoreAdminData.kpis = resp.kpis;
+        cachedStoreAdminData.logs = resp.logs || [];
+        cachedStoreAdminData.roster = resp.roster || [];
+        renderStoreAdminUI();
+        LiveSync.triggerImmediate();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add Staff to Store';
+      }
+      showToast("Error adding staff: " + (err.message || err), "error");
+    })
+    .addStoreStaff(payload);
+}
+
+/**
+ * Store Admin: Remove Staff from Store
+ */
+function handleStoreAdminRemoveStaff(email, name) {
+  if (!confirm("Are you sure you want to remove " + name + " from this store?")) return;
+  var callerEmail = getCurrentUserEmail();
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (resp && resp.success) {
+        showToast(name + " removed from store roster.", "success");
+        cachedStoreAdminData.kpis = resp.kpis;
+        cachedStoreAdminData.roster = resp.roster || [];
+        renderStoreAdminUI();
+        LiveSync.triggerImmediate();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Error removing staff: " + (err.message || err), "error");
+    })
+    .removeStaffFromStore({ email: email, callerEmail: callerEmail });
+}
+
+/* ==========================================================================
+   UI 3: GROUND STAFF (USER) ATTENDANCE CHECK-IN LOGIC
+   ========================================================================== */
+
+function renderUserUI(state) {
+  var store = AppState.getSelectedStore();
+  var rawStoreName = store ? store.storeName : '';
+  var displayStoreName = formatStoreName(rawStoreName);
+
+  // 1. Header Title: Formatted Mother Hub Name
+  var headerTitle = document.getElementById('header-store-name');
+  if (headerTitle) {
+    headerTitle.textContent = displayStoreName;
+  }
+
+  // 2. Card Header: Formatted Mother Hub Name & Boundary
+  var storeTitle = document.getElementById('store-title-label');
+  var storeSubtitle = document.getElementById('store-subtitle');
+  if (storeTitle) {
+    storeTitle.textContent = displayStoreName;
+  }
+  if (storeSubtitle && store) {
+    storeSubtitle.textContent = store.radiusMeters + 'm verification boundary';
+  }
+
+  // 3. Location Status Badge & Distinct Button States
+  var locationBadge = document.getElementById('location-badge');
+  var btnTakePhoto = document.getElementById('btn-take-photo');
+  var btnMainPunch = document.getElementById('btn-main-punch');
+
+  var actionLabel = (currentCheckType === 'CHECK_IN') ? 'Check In' : 'Check Out';
+
+  // Photo button label (Zero Emojis)
+  if (btnTakePhoto) {
+    btnTakePhoto.textContent = capturedSelfieBase64 ? 'Retake Photo' : 'Take Photo';
+  }
+
+  if (locationBadge) {
+    if (state.geo.status === 'ERROR') {
+      locationBadge.className = 'badge-status error';
+      locationBadge.textContent = 'Location unavailable';
+      if (btnMainPunch) {
+        btnMainPunch.disabled = true;
+        btnMainPunch.classList.remove('ready');
+        btnMainPunch.textContent = 'Enable location to ' + actionLabel;
+      }
+    } else if (state.geo.distance === null || state.geo.status === 'LOCKING' || state.geo.status === 'INITIALIZING') {
+      locationBadge.className = 'badge-status checking';
+      locationBadge.textContent = 'Checking location...';
+      if (btnMainPunch) {
+        btnMainPunch.disabled = true;
+        btnMainPunch.classList.remove('ready');
+        btnMainPunch.textContent = 'Checking location...';
+      }
+    } else if (state.geo.isInside) {
+      locationBadge.className = 'badge-status inside';
+      locationBadge.textContent = 'At Store · ' + Math.round(state.geo.distance) + 'm away';
+
+      if (btnMainPunch) {
+        if (!capturedSelfieBase64) {
+          btnMainPunch.disabled = true;
+          btnMainPunch.classList.remove('ready');
+          btnMainPunch.textContent = 'Take Photo to ' + actionLabel;
+        } else {
+          btnMainPunch.disabled = false;
+          btnMainPunch.classList.add('ready');
+          btnMainPunch.textContent = 'Proceed to ' + actionLabel;
+        }
+      }
+    } else {
+      locationBadge.className = 'badge-status outside';
+      locationBadge.textContent = 'Too far from store · ' + Math.round(state.geo.distance) + 'm away';
+      if (btnMainPunch) {
+        btnMainPunch.disabled = true;
+        btnMainPunch.classList.remove('ready');
+        btnMainPunch.textContent = 'Move closer (' + Math.round(state.geo.distance) + 'm away)';
+      }
+    }
+  }
+
+  // 4. Personal History List
+  renderPersonalHistory(state.recentLogs);
+}
+
+/**
+ * Punch Type Toggle: CHECK_IN / CHECK_OUT
+ */
+function setPunchType(type) {
+  currentCheckType = type;
+  var toggleIn = document.getElementById('toggle-in');
+  var toggleOut = document.getElementById('toggle-out');
+
+  if (toggleIn) {
+    toggleIn.className = (type === 'CHECK_IN') 
+      ? 'toggle-option active checkin-active' 
+      : 'toggle-option';
+  }
+  if (toggleOut) {
+    toggleOut.className = (type === 'CHECK_OUT') 
+      ? 'toggle-option active checkout-active' 
+      : 'toggle-option';
+  }
+
+  renderUserUI(AppState.getState());
+}
+
+/**
+ * Triggers native device camera
+ */
+function triggerNativeCamera() {
+  var input = document.getElementById('native-camera-input');
+  if (input) {
+    input.value = '';
+    input.click();
+  }
+}
+
+/**
+ * Processes camera capture
+ */
+function handleNativeCameraCapture(event) {
+  var file = event.target.files && event.target.files[0];
+  if (!file) return;
+
+  var state = AppState.getState();
+  var store = AppState.getSelectedStore();
+  var user = state.currentUser;
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      try {
+        var metadata = {
+          email: user ? user.email : '',
+          employeeCode: user ? user.employeeCode : '',
+          storeName: store ? store.storeName : 'Mother Hub',
+          checkType: currentCheckType,
+          distance: state.geo.distance !== null ? Math.round(state.geo.distance) : null,
+          isInside: state.geo.isInside,
+          lat: state.geo.lat,
+          lng: state.geo.lng,
+          accuracy: state.geo.accuracy
+        };
+
+        var watermarkedBase64 = CameraWatermark.burnWatermarkFromImage(img, metadata);
+        setCapturedPhoto(watermarkedBase64);
+        showToast("Photo captured! Tap Proceed to submit.", "success");
+      } catch (err) {
+        showToast("Error processing photo: " + err.message, "error");
+      }
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function setCapturedPhoto(base64Data) {
+  capturedSelfieBase64 = base64Data;
+  var previewImg = document.getElementById('selfie-preview-img');
+  var placeholder = document.getElementById('camera-placeholder');
+
+  if (placeholder) placeholder.classList.add('hidden');
+  if (previewImg) {
+    previewImg.src = base64Data;
+    previewImg.classList.remove('hidden');
+  }
+
+  renderUserUI(AppState.getState());
+}
+
+function resetCapturedPhoto() {
+  capturedSelfieBase64 = null;
+  var previewImg = document.getElementById('selfie-preview-img');
+  var placeholder = document.getElementById('camera-placeholder');
+  var nativeInput = document.getElementById('native-camera-input');
+
+  if (previewImg) {
+    previewImg.src = '';
+    previewImg.classList.add('hidden');
+  }
+  if (placeholder) placeholder.classList.remove('hidden');
+  if (nativeInput) nativeInput.value = '';
+
+  renderUserUI(AppState.getState());
+}
+
+function handleProceedClick() {
+  var state = AppState.getState();
+  var store = AppState.getSelectedStore();
+
+  if (!store) {
+    showToast("Waiting for nearest Mother Hub location...", "error");
+    return;
+  }
+
+  if (!state.geo.isInside) {
+    showToast("Cannot submit: Outside " + formatStoreName(store.storeName) + " boundary.", "error");
+    return;
+  }
+
+  if (!capturedSelfieBase64) {
+    showToast("Please tap 'Take Photo' first.", "info");
+    triggerNativeCamera();
+    return;
+  }
+
+  handleSubmitPunch();
+}
+
+function handleSubmitPunch() {
+  var state = AppState.getState();
+  var store = AppState.getSelectedStore();
+  var user = state.currentUser;
+
+  var btnMainPunch = document.getElementById('btn-main-punch');
+  var origPunchText = btnMainPunch ? btnMainPunch.textContent : '';
+  var loader = document.getElementById('submission-loader');
+
+  if (btnMainPunch) {
+    btnMainPunch.disabled = true;
+    btnMainPunch.classList.add('btn-loading');
+    btnMainPunch.textContent = 'Submitting...';
+  }
+  if (loader) loader.classList.remove('hidden');
+
+  var payload = {
+    email: user ? user.email : getCurrentUserEmail(),
+    storeId: store.storeId,
+    checkType: currentCheckType,
+    userLat: state.geo.lat,
+    userLng: state.geo.lng,
+    accuracyMeters: state.geo.accuracy,
+    deviceType: state.geo.deviceType,
+    base64Selfie: capturedSelfieBase64
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (loader) loader.classList.add('hidden');
+      if (btnMainPunch) {
+        btnMainPunch.disabled = false;
+        btnMainPunch.classList.remove('btn-loading');
+        btnMainPunch.textContent = origPunchText || 'Proceed to Check In';
+      }
+
+      if (resp && resp.success) {
+        var actionText = (resp.checkType === 'CHECK_OUT') ? 'Checked Out' : 'Checked In';
+        showToast(actionText + " successfully at " + formatStoreName(resp.storeName || store.storeName) + ".", "success");
+        resetCapturedPhoto();
+        reloadSessionData(user ? user.email : '', function() {
+          LiveSync.triggerImmediate();
+        });
+      } else {
+        showToast("Submission failed: " + (resp ? resp.message : "Unknown error"), "error");
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (loader) loader.classList.add('hidden');
+      if (btnMainPunch) {
+        btnMainPunch.disabled = false;
+        btnMainPunch.classList.remove('btn-loading');
+        btnMainPunch.textContent = origPunchText || 'Proceed to Check In';
+      }
+      showToast("Submission error: " + (err.message || err), "error");
+    })
+    .submitAttendanceLog(payload);
+}
+
+function renderPersonalHistory(logs) {
+  var listEl = document.getElementById('personal-history-list');
+  if (!listEl) return;
+
+  if (!logs || logs.length === 0) {
+    listEl.innerHTML = 
+      '<div style="text-align: center; padding: 1.25rem; font-size: 0.85rem; color: var(--ink-muted);">' +
+        'No recent attendance recorded.' +
+      '</div>';
+    return;
+  }
+
+  var html = '';
+  logs.forEach(function(log) {
+    var isCheckIn = (log.checkType === 'CHECK_IN');
+    var badgeClass = isCheckIn ? 'inside' : 'checking';
+    var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
+    var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+
+    var dateObj = new Date(log.timestamp);
+    var timeFormatted = !isNaN(dateObj.getTime()) 
+      ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : log.timestamp;
+
+    var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm' : '';
+    var displayStore = formatStoreName(log.storeName || 'Mother Hub');
+
+    html += 
+      '<div class="activity-card-item ' + itemCardClass + '">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name" title="' + displayStore + '">' + displayStore + '</div>' +
+          '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+        '</div>' +
+        '<div class="activity-row-bottom">' +
+          '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
+          (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + badgeText + ' Photo\')">View Photo</button>' : '') +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+/* ==========================================================================
+   IN-APP PHOTO RENDERING (NO "OPEN IN DRIVE", ZERO EMOJIS)
+   Fetches Base64 from Google Apps Script and sets img.src = dataUri
+   ========================================================================== */
+
+function openPhotoModal(imgUrlOrId, title) {
+  var modal = document.getElementById('view-photo-modal');
+  var img = document.getElementById('photo-modal-img');
+  var spinner = document.getElementById('photo-modal-spinner');
+  var titleEl = document.getElementById('photo-modal-title');
+
+  if (titleEl) titleEl.textContent = title || 'Verification Photo';
+  if (modal) modal.classList.remove('hidden');
+
+  // Reset to loading state
+  if (img) {
+    img.src = '';
+    img.classList.add('hidden');
+  }
+  if (spinner) {
+    spinner.textContent = 'Loading verification photo...';
+    spinner.style.color = '#FFFFFF';
+    spinner.classList.remove('hidden');
+  }
+
+  // Fetch Base64 data URI directly from server
+  google.script.run
+    .withSuccessHandler(function(dataUri) {
+      if (spinner) spinner.classList.add('hidden');
+      if (img) {
+        img.src = dataUri;
+        img.classList.remove('hidden');
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (spinner) {
+        spinner.textContent = 'Failed to load photo: ' + (err.message || err);
+        spinner.style.color = '#FCA5A5';
+      }
+    })
+    .getSelfieBase64(imgUrlOrId);
+}
+
+function closePhotoModal() {
+  var modal = document.getElementById('view-photo-modal');
+  var img = document.getElementById('photo-modal-img');
+  if (modal) modal.classList.add('hidden');
+  if (img) {
+    img.src = '';
+    img.classList.add('hidden');
+  }
+}
+</script>

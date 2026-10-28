@@ -1,0 +1,5 @@
+# Clasp Ignore
+**/**
+!appsscript.json
+!*.gs
+!*.html

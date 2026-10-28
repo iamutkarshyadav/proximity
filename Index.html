@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <base target="_top">
+    <title>Proximity</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="Proximity - Geofenced Attendance Verification Platform">
+
+    <!-- Neo-Brutalist Typography: Plus Jakarta Sans & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- Design System Tokens & Component Styles -->
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <div class="app-container" id="app-container">
+      
+      <!-- Sticky Top Application Bar: Brand "PROXIMITY" (Freezed on Scroll Across All Portals) -->
+      <header class="top-bar" id="app-top-bar">
+        <div class="top-bar-left">
+          <div class="brand-pill">
+            <span class="app-brand-name">PROXIMITY</span>
+          </div>
+          <div class="top-bar-sub">
+            <span id="header-store-name" class="header-context-badge">Portal</span>
+            <span class="header-dot-sep">·</span>
+            <span id="header-live-clock">--:--:--</span>
+            <span id="header-user-email-wrap" class="hidden">
+              <span class="header-dot-sep">·</span>
+              <span id="header-user-email"></span>
+            </span>
+          </div>
+        </div>
+
+        <div class="top-bar-right">
+          <button type="button" id="btn-header-refresh" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()" title="Refresh Data">
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      <!-- Main Application Container: Strict 3-Role Separated Views -->
+      <main id="main-content">
+        <!-- Initial Loading View (Zero Emojis) -->
+        <div id="view-loading" class="ui-card" style="text-align: center; padding: 2.5rem 1rem;">
+          <div style="font-size: 1.2rem; font-weight: 800; color: var(--ink-primary); margin-bottom: 0.35rem; font-family: var(--font-mono); letter-spacing: 0.05em;">PROXIMITY</div>
+          <div style="font-size: 0.8rem; color: var(--ink-muted);">Authenticating session and resolving profile...</div>
+        </div>
+
+        <!-- Corporate Multi-User Sign In Card -->
+        <div id="view-auth-prompt" class="ui-card auth-card hidden">
+          <div class="auth-card-badge">IDENTITY VERIFICATION</div>
+          <div class="auth-card-title">Workplace Sign In</div>
+          <div class="auth-card-subtitle">
+            Enter your workplace Google email to access your assigned role dashboard.
+          </div>
+
+          <form onsubmit="handleManualAuthSubmit(event)" id="form-manual-auth">
+            <div style="margin-bottom: 1.25rem; text-align: left;">
+              <label class="ui-label" for="manual-auth-email">Corporate Google Email</label>
+              <input 
+                type="email" 
+                id="manual-auth-email" 
+                class="ui-input" 
+                placeholder="colleague@company.com" 
+                autocomplete="email"
+                required
+              >
+            </div>
+            <button type="submit" id="btn-manual-auth" class="btn-primary auth-submit-btn">
+              Continue to Dashboard
+            </button>
+          </form>
+
+          <div id="auth-status-msg" class="auth-status-msg hidden"></div>
+        </div>
+
+        <!-- Dedicated Unauthorized / Access Denied Error View -->
+        <div id="view-access-denied" class="ui-card error-card hidden">
+          <div class="error-card-badge">ACCESS DENIED</div>
+          <div class="error-card-title">Access Error</div>
+          <div class="error-card-email-box">
+            <span id="access-denied-email">user@company.com</span>
+          </div>
+          <p class="error-card-desc" id="access-denied-msg">
+            Error: This account is not registered in the database.
+          </p>
+          <div class="error-card-instruction">
+            Only authorized workplace accounts pre-registered by the administrator can access this platform. Contact your organization administrator to add your email to the database.
+          </div>
+          <button type="button" id="btn-error-retry" class="btn-secondary btn-sm" onclick="showAuthPromptManual()" style="margin-top: 1.25rem; width: 100%;">
+            Try Different Corporate Email
+          </button>
+        </div>
+
+        <!-- Role 1: Ground Staff Check-In UI (ONLY role that marks attendance) -->
+        <?!= include('UserDashboard'); ?>
+
+        <!-- Role 2: Store Admin Dashboard (Scoped Single-Store Monitoring & Staff Roster) -->
+        <?!= include('StoreAdminDashboard'); ?>
+
+        <!-- Role 3: Super Admin Dashboard (Master Control, Global Feed & CRUD) -->
+        <?!= include('SuperAdminDashboard'); ?>
+      </main>
+
+    </div>
+
+    <!-- Modal: View Verification Photo (100% In-App Photo Rendering - NO "Open in Drive") -->
+    <div id="view-photo-modal" class="modal-backdrop hidden" onclick="if(event.target===this) closePhotoModal()">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div class="modal-title" id="photo-modal-title">Verification Photo</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closePhotoModal()">Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="photo-preview-box">
+            <!-- In-App Photo Spinner (Zero Emojis) -->
+            <div id="photo-modal-spinner" class="photo-spinner">
+              Loading verification photo...
+            </div>
+            <!-- Full Watermarked Image -->
+            <img id="photo-modal-img" class="hidden" src="" alt="Verification Photo">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-primary btn-sm" onclick="closePhotoModal()">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Change Store Admin (Super Admin) -->
+    <div id="modal-change-admin" class="modal-backdrop hidden" onclick="if(event.target===this) closeChangeAdminModal()">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-header">
+          <div class="modal-title" id="change-admin-store-title">Assign Store Manager</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Close</button>
+        </div>
+        <form id="form-change-admin" onsubmit="handleSuperAdminSubmitChangeAdmin(event)">
+          <input type="hidden" id="change-admin-store-id">
+          <div class="modal-body">
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="change-admin-email">Manager Google Email</label>
+              <input type="email" id="change-admin-email" class="ui-input" placeholder="manager@company.com" required>
+            </div>
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="change-admin-name">Manager Full Name</label>
+              <input type="text" id="change-admin-name" class="ui-input" placeholder="e.g. Ramesh Singh">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Cancel</button>
+            <button type="submit" id="btn-save-change-admin" class="btn-primary btn-sm">Assign Manager</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Edit User Role & Store (Super Admin) -->
+    <div id="modal-edit-user" class="modal-backdrop hidden" onclick="if(event.target===this) closeEditUserModal()">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-header">
+          <div class="modal-title" id="edit-user-title">Edit User Access</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closeEditUserModal()">Close</button>
+        </div>
+        <form id="form-edit-user" onsubmit="handleSuperAdminSubmitEditUser(event)">
+          <input type="hidden" id="edit-user-email">
+          <div class="modal-body">
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label">User Email</label>
+              <div id="edit-user-display-email" style="font-weight: 700; font-size: 0.88rem; color: var(--ink-secondary);"></div>
+            </div>
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="edit-user-role">Role</label>
+              <select id="edit-user-role" class="ui-select" required>
+                <option value="USER">USER (Ground Staff)</option>
+                <option value="STORE_ADMIN">STORE_ADMIN (Store Manager)</option>
+                <option value="SUPER_ADMIN">SUPER_ADMIN (Master Admin)</option>
+              </select>
+            </div>
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="edit-user-store">Assigned Store</label>
+              <select id="edit-user-store" class="ui-select">
+                <option value="">None / Unassigned</option>
+              </select>
+            </div>
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="edit-user-status">Status</label>
+              <select id="edit-user-status" class="ui-select">
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="INACTIVE">INACTIVE</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn-secondary btn-sm" onclick="closeEditUserModal()">Cancel</button>
+            <button type="submit" id="btn-save-edit-user" class="btn-primary btn-sm">Save Changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Toast Notification Drawer -->
+    <div id="toast" class="toast"></div>
+
+    <!-- Live Clock Script -->
+    <script>
+      function updateLiveClock() {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const clockEl = document.getElementById('header-live-clock');
+        if (clockEl) clockEl.textContent = timeStr;
+      }
+      setInterval(updateLiveClock, 1000);
+      updateLiveClock();
+    </script>
+
+    <!-- Client Scripts & State Engines -->
+    <?!= include('State'); ?>
+    <?!= include('GeoTracker'); ?>
+    <?!= include('CameraWatermark'); ?>
+    <?!= include('App'); ?>
+  </body>
+</html>
