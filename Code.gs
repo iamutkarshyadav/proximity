@@ -200,11 +200,13 @@ function getInitialSessionData(clientEmailHint) {
 
     Database.updateLastLogin(email);
 
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+
     // 3. Strict 3-Role Data Scoping: SUPER_ADMIN | STORE_ADMIN | USER
     if (user.role === "SUPER_ADMIN") {
       const kpis = Database.getGlobalKpis();
-      const stores = Database.getAllStores(true); // All stores (active & inactive)
-      const logs = Database.getScopedAttendanceLogs("SUPER_ADMIN", "", "", "ALL", 100);
+      const stores = Database.getAllStores(true); // All stores with multi-managers
+      const dateAttendance = Database.getDateGroupedAttendanceLogs("SUPER_ADMIN", "", "", "ALL", todayStr, todayStr, "TIME", "DESC", 100);
       const allUsers = Database.getAllUsers();
 
       return {
@@ -213,7 +215,7 @@ function getInitialSessionData(clientEmailHint) {
         user: user,
         kpis: kpis,
         stores: stores,
-        logs: logs,
+        dateAttendance: dateAttendance,
         allUsers: allUsers,
         serverTime: serverTime
       };
@@ -229,7 +231,7 @@ function getInitialSessionData(clientEmailHint) {
 
       const storeId = store ? store.storeId : "";
       const kpis = Database.getStoreKpis(storeId);
-      const logs = Database.getScopedAttendanceLogs("STORE_ADMIN", storeId, user.email, storeId, 100);
+      const dateAttendance = Database.getDateGroupedAttendanceLogs("STORE_ADMIN", storeId, user.email, storeId, todayStr, todayStr, "TIME", "DESC", 100);
       const roster = Database.getScopedUsers("STORE_ADMIN", storeId, user.email);
 
       return {
@@ -238,21 +240,23 @@ function getInitialSessionData(clientEmailHint) {
         user: user,
         store: store,
         kpis: kpis,
-        logs: logs,
+        dateAttendance: dateAttendance,
         roster: roster,
         serverTime: serverTime
       };
     } else {
-      // Ground Staff (USER) - ONLY role that punches attendance
+      // Ground Staff (USER) - Live Shift Tracker & Paired Work History
       const allStores = Database.getActiveStores();
-      const recentLogs = Database.getRecentLogsForUser(email, 10);
+      const shiftStatus = Database.getUserShiftStatus(email);
+      const pairedHistory = Database.getPairedUserHistory(email, 15);
 
       return {
         success: true,
         role: "USER",
         user: user,
         stores: allStores,
-        recentLogs: recentLogs,
+        shiftStatus: shiftStatus,
+        pairedHistory: pairedHistory,
         serverTime: serverTime
       };
     }
@@ -290,18 +294,23 @@ function verifyUserEmail(email) {
 /**
  * Super Admin: Refreshes Dashboard Data
  */
-function getSuperAdminDashboardData(callerEmail) {
+function getSuperAdminDashboardData(callerEmail, startDate, endDate, sortKey, sortOrder, filterStoreId) {
   const sessionEmail = getAuthenticatedEmail(callerEmail);
   const caller = Database.findUserByEmail(sessionEmail);
   if (!caller || caller.role !== "SUPER_ADMIN") {
     throw new Error("Super Admin access required.");
   }
 
+  const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+  const sDate = startDate || todayStr;
+  const eDate = endDate || todayStr;
+  const storeFilter = filterStoreId || "ALL";
+
   return {
     success: true,
     kpis: Database.getGlobalKpis(),
     stores: Database.getAllStores(true),
-    logs: Database.getScopedAttendanceLogs("SUPER_ADMIN", "", "", "ALL", 100),
+    dateAttendance: Database.getDateGroupedAttendanceLogs("SUPER_ADMIN", "", "", storeFilter, sDate, eDate, sortKey || "TIME", sortOrder || "DESC", 200),
     allUsers: Database.getAllUsers(),
     serverTime: new Date().toISOString()
   };
@@ -310,7 +319,7 @@ function getSuperAdminDashboardData(callerEmail) {
 /**
  * Store Admin: Refreshes Dashboard Data
  */
-function getStoreAdminDashboardData(callerEmail) {
+function getStoreAdminDashboardData(callerEmail, startDate, endDate, sortKey, sortOrder) {
   const sessionEmail = getAuthenticatedEmail(callerEmail);
   const caller = Database.findUserByEmail(sessionEmail);
   if (!caller || (caller.role !== "STORE_ADMIN" && caller.role !== "SUPER_ADMIN")) {
@@ -320,14 +329,18 @@ function getStoreAdminDashboardData(callerEmail) {
   const store = Database.getStoreById(caller.assignedStoreId);
   const storeId = store ? store.storeId : caller.assignedStoreId;
   const kpis = Database.getStoreKpis(storeId);
-  const logs = Database.getScopedAttendanceLogs(caller.role, storeId, caller.email, storeId, 100);
+  const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+  const sDate = startDate || todayStr;
+  const eDate = endDate || todayStr;
+
+  const dateAttendance = Database.getDateGroupedAttendanceLogs(caller.role, storeId, caller.email, storeId, sDate, eDate, sortKey || "TIME", sortOrder || "DESC", 200);
   const roster = Database.getScopedUsers(caller.role, storeId, caller.email);
 
   return {
     success: true,
     store: store,
     kpis: kpis,
-    logs: logs,
+    dateAttendance: dateAttendance,
     roster: roster,
     serverTime: new Date().toISOString()
   };
@@ -343,14 +356,108 @@ function getUserDashboardData(callerEmail) {
     throw new Error("User access required.");
   }
   const allStores = Database.getActiveStores();
-  const recentLogs = Database.getRecentLogsForUser(sessionEmail, 10);
+  const shiftStatus = Database.getUserShiftStatus(sessionEmail);
+  const pairedHistory = Database.getPairedUserHistory(sessionEmail, 15);
+
   return {
     success: true,
     user: user,
     stores: allStores,
-    recentLogs: recentLogs,
+    shiftStatus: shiftStatus,
+    pairedHistory: pairedHistory,
     serverTime: new Date().toISOString()
   };
+}
+
+/**
+ * Dedicated API Endpoint: Filter Date-Wise Attendance with Multi-Criteria Sorting
+ */
+function getDateGroupedAttendance(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller) throw new Error("Unauthorized.");
+
+  const role = caller.role;
+  if (role !== "STORE_ADMIN" && role !== "SUPER_ADMIN") {
+    throw new Error("Management access required.");
+  }
+
+  const storeId = (role === "STORE_ADMIN") ? caller.assignedStoreId : (payload.filterStoreId || "ALL");
+  const startDate = payload.startDate ? String(payload.startDate).trim() : "";
+  const endDate = payload.endDate ? String(payload.endDate).trim() : "";
+  const sortKey = payload.sortKey || "TIME";
+  const sortOrder = payload.sortOrder || "DESC";
+
+  return Database.getDateGroupedAttendanceLogs(
+    role,
+    caller.assignedStoreId,
+    caller.email,
+    storeId,
+    startDate,
+    endDate,
+    sortKey,
+    sortOrder,
+    250
+  );
+}
+
+/**
+ * Super Admin: Multi-Manager - Assign / Add Manager to Store
+ */
+function assignStoreManager(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || caller.role !== "SUPER_ADMIN") {
+    throw new Error("Super Admin access required.");
+  }
+
+  if (!payload.storeId) throw new Error("Store ID is required.");
+  if (!payload.managerEmail) throw new Error("Manager Email is required.");
+
+  Database.addStoreManager(
+    payload.storeId,
+    payload.managerEmail,
+    payload.fullName || "",
+    payload.employeeCode || "",
+    !!payload.isPrimary,
+    sessionEmail
+  );
+
+  return getSuperAdminDashboardData(sessionEmail);
+}
+
+/**
+ * Super Admin: Multi-Manager - Remove Manager from Store
+ */
+function removeStoreManager(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || caller.role !== "SUPER_ADMIN") {
+    throw new Error("Super Admin access required.");
+  }
+
+  if (!payload.storeId) throw new Error("Store ID is required.");
+  if (!payload.managerEmail) throw new Error("Manager Email is required.");
+
+  Database.removeStoreManager(payload.storeId, payload.managerEmail, sessionEmail);
+  return getSuperAdminDashboardData(sessionEmail);
+}
+
+/**
+ * Super Admin: Multi-Manager - Set Designated Primary Manager
+ */
+function setPrimaryStoreManager(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || caller.role !== "SUPER_ADMIN") {
+    throw new Error("Super Admin access required.");
+  }
+
+  if (!payload.storeId) throw new Error("Store ID is required.");
+  if (!payload.managerEmail) throw new Error("Manager Email is required.");
+
+  Database.setPrimaryStoreManager(payload.storeId, payload.managerEmail);
+  return getSuperAdminDashboardData(sessionEmail);
 }
 
 /**
@@ -653,6 +760,9 @@ function submitAttendanceLog(payload) {
       verificationStatus: verificationStatus
     });
 
+    const shiftStatus = Database.getUserShiftStatus(sessionEmail);
+    const pairedHistory = Database.getPairedUserHistory(sessionEmail, 15);
+
     return {
       success: true,
       logId: logId,
@@ -661,7 +771,9 @@ function submitAttendanceLog(payload) {
       checkType: payload.checkType,
       storeName: store.storeName,
       selfieUrl: selfieRecord.viewUrl,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      shiftStatus: shiftStatus,
+      pairedHistory: pairedHistory
     };
   } finally {
     lock.releaseLock();

@@ -1,17 +1,63 @@
 <!-- ==========================================================================
-     USER CHECK-IN UI // GROUND STAFF ATTENDANCE & PERSONAL ACTIVITY ONLY
-     Strictly for USER role (Zero Emojis, Clean Tactile Neo-Brutalism)
+     USER CHECK-IN UI // GROUND STAFF ATTENDANCE & LIVE SHIFT TRACKER
+     Linear / Apple Grade Modern Enterprise Interface (Zero Emojis, Zero Slop)
      ========================================================================== -->
 
 <div id="view-user-dashboard" class="hidden">
-  <!-- Unified Focused Check-In Card -->
+  
+  <!-- 1. Real-Time Live Workday Shift Tracker Widget -->
+  <div class="ui-card shift-tracker-card" id="user-shift-tracker-card">
+    <div class="card-header-row" style="margin-bottom: 0.25rem;">
+      <div class="card-header-left">
+        <div id="tracker-duty-title" class="tracker-title">Not Checked In</div>
+      </div>
+      <div id="tracker-duty-badge" class="badge-status checking">Off Duty</div>
+    </div>
+
+    <!-- Active Shift Stopwatch (Shown when ON_DUTY) -->
+    <div id="tracker-active-box" class="tracker-active-box hidden">
+      <div class="tracker-timer-wrap">
+        <div id="tracker-stopwatch" class="tracker-stopwatch">00:00:00</div>
+      </div>
+      <div class="tracker-meta-row">
+        <div class="tracker-meta-item">
+          <span class="meta-label">Checked In</span>
+          <span id="tracker-checkin-time" class="meta-val">--:--</span>
+        </div>
+        <div class="tracker-meta-item">
+          <span class="meta-label">Store</span>
+          <span id="tracker-store-name" class="meta-val">--</span>
+        </div>
+        <div class="tracker-meta-item" id="tracker-in-photo-wrap">
+          <button type="button" id="btn-view-active-in-photo" class="btn-secondary btn-xs" onclick="handleViewActiveCheckInPhoto()">
+            View Entry Photo
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Completed Shift Summary (Shown when SHIFT_COMPLETED) -->
+    <div id="tracker-completed-box" class="tracker-completed-box hidden">
+      <div class="completed-metric-row">
+        <div class="completed-tile">
+          <div class="completed-label">Today's Total</div>
+          <div id="tracker-total-today-dur" class="completed-val text-green">0h 00m</div>
+        </div>
+        <div class="completed-tile">
+          <div class="completed-label">Completed Shifts</div>
+          <div id="tracker-shifts-count" class="completed-val">0</div>
+        </div>
+      </div>
+      <div id="tracker-today-shifts-list" class="tracker-mini-shifts"></div>
+    </div>
+  </div>
+
+  <!-- 2. Attendance Action Card -->
   <div class="ui-card">
     
-    <!-- Header Row inside Card: Auto-Captured Hub Name & Status Badge -->
     <div class="card-header-row">
       <div class="card-header-left">
-        <div id="store-title-label" class="card-heading">Locating nearest Hub...</div>
-        <div id="store-subtitle" class="card-subheading">100m verification boundary</div>
+        <div id="store-title-label" class="card-heading">Locating Store...</div>
       </div>
       <span id="location-badge" class="badge-status checking">
         Checking location...
@@ -20,7 +66,7 @@
 
     <!-- Segmented Check In / Check Out Toggle -->
     <div class="segmented-toggle">
-      <button type="button" id="toggle-in" class="toggle-option active checkin-active" onclick="setPunchType('CHECK_IN')">
+      <button type="button" id="toggle-in" class="toggle-option active" onclick="setPunchType('CHECK_IN')">
         Check In
       </button>
       <button type="button" id="toggle-out" class="toggle-option" onclick="setPunchType('CHECK_OUT')">
@@ -28,47 +74,45 @@
       </button>
     </div>
 
-    <!-- Clean Blueprint Camera Viewport -->
+    <!-- Camera Viewport -->
     <div class="camera-box">
       <video id="camera-video" autoplay playsinline muted webkit-playsinline class="hidden"></video>
       <img id="selfie-preview-img" class="hidden" alt="Verification Photo">
       <input type="file" id="native-camera-input" accept="image/*" capture="user" style="display:none;" onchange="handleNativeCameraCapture(event)">
       
       <div id="camera-placeholder" class="camera-placeholder">
-        <div class="camera-placeholder-badge">PHOTO REQUIRED</div>
-        <div class="camera-placeholder-text">Identity verification photo required</div>
+        <div class="camera-placeholder-text">Camera Ready</div>
       </div>
     </div>
 
-    <!-- 1. Take Photo / Retake Photo Button (Sky Cyan) -->
+    <!-- Photo & Proceed Buttons -->
     <button type="button" id="btn-take-photo" class="btn-photo" onclick="triggerNativeCamera()">
       Take Photo
     </button>
 
-    <!-- 2. Primary Proceed Button (Emerald Green when ready) -->
     <button type="button" id="btn-main-punch" class="btn-proceed" disabled onclick="handleProceedClick()">
       Proceed to Check In
     </button>
 
     <!-- Submission State -->
-    <div id="submission-loader" class="hidden" style="margin-top: 0.75rem; text-align: center; font-size: 0.85rem; font-weight: 700; color: var(--accent-primary);">
+    <div id="submission-loader" class="hidden" style="margin-top: 0.75rem; text-align: center; font-size: 0.82rem; font-weight: 600; color: var(--text-secondary);">
       Verifying location and saving photo...
     </div>
 
   </div>
 
-  <!-- Quiet Recent Activity List Below Card -->
+  <!-- 3. Attendance History Ledger -->
   <div class="ui-card">
     <div class="card-header-row" style="margin-bottom: 0.75rem; align-items: center;">
-      <div class="card-heading" style="font-size: 0.95rem;">Recent Activity</div>
+      <div class="card-heading">Attendance History</div>
       <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
         Refresh
       </button>
     </div>
 
     <div id="personal-history-list" class="card-list">
-      <div style="text-align: center; padding: 1.25rem; font-size: 0.85rem; color: var(--ink-muted);">
-        No recent attendance recorded.
+      <div style="text-align: center; padding: 1.25rem; font-size: 0.82rem; color: var(--text-muted);">
+        Loading attendance history...
       </div>
     </div>
   </div>

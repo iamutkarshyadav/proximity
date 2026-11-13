@@ -46,6 +46,29 @@ window.AppState = (function() {
     recentLogs: [],
     isSubmitting: false,
 
+    // Live Shift Tracker (Ground Staff)
+    shiftStatus: {
+      status: 'NOT_CHECKED_IN', // 'NOT_CHECKED_IN' | 'ON_DUTY' | 'SHIFT_COMPLETED'
+      activeShift: null,
+      todayShifts: [],
+      totalTodayMinutes: 0,
+      totalTodayFormatted: "0m"
+    },
+    pairedHistory: [],
+
+    // Date-Wise Grouped Attendance Feed (Manager & Super Admin)
+    dateAttendance: {
+      startDate: '',
+      endDate: '',
+      sortKey: 'TIME',
+      sortOrder: 'DESC',
+      dateGroups: [],
+      totalRecords: 0,
+      filterStoreId: 'ALL',
+      searchQuery: '',
+      isLoading: false
+    },
+
     // Scoped Team & Admin Data
     teamData: {
       team: [],

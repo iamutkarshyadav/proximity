@@ -44,23 +44,19 @@
 
       <!-- Main Application Container: Strict 3-Role Separated Views -->
       <main id="main-content">
-        <!-- Initial Loading View (Zero Emojis) -->
+        <!-- Initial Loading View -->
         <div id="view-loading" class="ui-card" style="text-align: center; padding: 2.5rem 1rem;">
-          <div style="font-size: 1.2rem; font-weight: 800; color: var(--ink-primary); margin-bottom: 0.35rem; font-family: var(--font-mono); letter-spacing: 0.05em;">PROXIMITY</div>
-          <div style="font-size: 0.8rem; color: var(--ink-muted);">Authenticating session and resolving profile...</div>
+          <div style="font-size: 1.1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.25rem;">PROXIMITY</div>
+          <div style="font-size: 0.8rem; color: var(--text-muted);">Authenticating session...</div>
         </div>
 
         <!-- Corporate Multi-User Sign In Card -->
         <div id="view-auth-prompt" class="ui-card auth-card hidden">
-          <div class="auth-card-badge">IDENTITY VERIFICATION</div>
-          <div class="auth-card-title">Workplace Sign In</div>
-          <div class="auth-card-subtitle">
-            Enter your workplace Google email to access your assigned role dashboard.
-          </div>
+          <div class="auth-card-title">Sign In</div>
 
           <form onsubmit="handleManualAuthSubmit(event)" id="form-manual-auth">
             <div style="margin-bottom: 1.25rem; text-align: left;">
-              <label class="ui-label" for="manual-auth-email">Corporate Google Email</label>
+              <label class="ui-label" for="manual-auth-email">Corporate Email</label>
               <input 
                 type="email" 
                 id="manual-auth-email" 
@@ -71,7 +67,7 @@
               >
             </div>
             <button type="submit" id="btn-manual-auth" class="btn-primary auth-submit-btn">
-              Continue to Dashboard
+              Continue
             </button>
           </form>
 
@@ -137,26 +133,90 @@
     <div id="modal-change-admin" class="modal-backdrop hidden" onclick="if(event.target===this) closeChangeAdminModal()">
       <div class="modal-dialog modal-dialog-sm">
         <div class="modal-header">
-          <div class="modal-title" id="change-admin-store-title">Assign Store Manager</div>
+          <div class="modal-title" id="change-admin-store-title">Manage Store Managers</div>
           <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Close</button>
         </div>
-        <form id="form-change-admin" onsubmit="handleSuperAdminSubmitChangeAdmin(event)">
+        <div class="modal-body">
           <input type="hidden" id="change-admin-store-id">
-          <div class="modal-body">
-            <div style="margin-bottom: 0.75rem;">
-              <label class="ui-label" for="change-admin-email">Manager Google Email</label>
-              <input type="email" id="change-admin-email" class="ui-input" placeholder="manager@company.com" required>
-            </div>
-            <div style="margin-bottom: 0.75rem;">
-              <label class="ui-label" for="change-admin-name">Manager Full Name</label>
-              <input type="text" id="change-admin-name" class="ui-input" placeholder="e.g. Ramesh Singh">
+          
+          <!-- Current Store Managers Roster -->
+          <div style="margin-bottom: 1rem;">
+            <label class="ui-label">Assigned Managers</label>
+            <div id="manage-managers-list" class="manage-managers-list">
+              <div style="font-size: 0.8rem; color: var(--ink-muted);">Loading managers...</div>
             </div>
           </div>
-          <div class="modal-footer">
-            <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Cancel</button>
-            <button type="submit" id="btn-save-change-admin" class="btn-primary btn-sm">Assign Manager</button>
+
+          <!-- Add / Promote New Manager Form -->
+          <div style="border-top: 1.5px dashed var(--ink-border); padding-top: 0.85rem;">
+            <div style="font-size: 0.82rem; font-weight: 700; color: var(--ink-primary); margin-bottom: 0.5rem;">
+              Add / Assign Manager to Store
+            </div>
+            <form id="form-add-store-manager" onsubmit="handleSuperAdminAddManager(event)">
+              <div style="margin-bottom: 0.5rem;">
+                <label class="ui-label" for="add-mgr-email">Manager Corporate Email</label>
+                <input type="email" id="add-mgr-email" class="ui-input" placeholder="manager@company.com" required>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.5rem;">
+                <div>
+                  <label class="ui-label" for="add-mgr-name">Full Name</label>
+                  <input type="text" id="add-mgr-name" class="ui-input" placeholder="e.g. Ramesh Singh">
+                </div>
+                <div>
+                  <label class="ui-label" for="add-mgr-code">Emp ID</label>
+                  <input type="text" id="add-mgr-code" class="ui-input" placeholder="e.g. MGR-101">
+                </div>
+              </div>
+              <div style="margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.4rem;">
+                <input type="checkbox" id="add-mgr-is-primary" style="accent-color: var(--ink-border);">
+                <label for="add-mgr-is-primary" style="font-size: 0.78rem; font-weight: 600; cursor: pointer;">Designate as Primary Manager</label>
+              </div>
+              <button type="submit" id="btn-save-add-mgr" class="btn-primary btn-sm" style="width: 100%;">
+                Add Manager to Store
+              </button>
+            </form>
           </div>
-        </form>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: View Dual Shift Photos (Check-In & Check-Out) -->
+    <div id="modal-dual-photos" class="modal-backdrop hidden" onclick="if(event.target===this) closeDualPhotoModal()">
+      <div class="modal-dialog modal-dialog-lg">
+        <div class="modal-header">
+          <div class="modal-title" id="dual-photo-modal-title">Workday Verification Photos</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closeDualPhotoModal()">Close</button>
+        </div>
+        <div class="modal-body">
+          <div class="dual-photos-grid">
+            <div class="dual-photo-col">
+              <div class="dual-photo-header">
+                <span class="badge-status inside">CHECK-IN</span>
+                <span id="dual-in-time" class="dual-time">--:--</span>
+              </div>
+              <div class="photo-preview-box">
+                <div id="dual-in-spinner" class="photo-spinner">Loading photo...</div>
+                <img id="dual-in-img" class="hidden" src="" alt="Check In Photo">
+              </div>
+            </div>
+            <div class="dual-photo-col">
+              <div class="dual-photo-header">
+                <span class="badge-status checking">CHECK-OUT</span>
+                <span id="dual-out-time" class="dual-time">--:--</span>
+              </div>
+              <div class="photo-preview-box">
+                <div id="dual-out-spinner" class="photo-spinner">Loading photo...</div>
+                <img id="dual-out-img" class="hidden" src="" alt="Check Out Photo">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary btn-sm" onclick="closeDualPhotoModal()">Close</button>
+        </div>
       </div>
     </div>
 

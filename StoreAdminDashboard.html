@@ -1,17 +1,19 @@
 <!-- ==========================================================================
-     STORE ADMIN DASHBOARD // SCOPED SINGLE-STORE MONITORING & STAFF ROSTER
-     Strictly for STORE_ADMIN role (Desktop & Mobile Optimized, Zero Emojis)
+     STORE ADMIN DASHBOARD // SCOPED STORE MONITORING & STAFF ROSTER
+     Linear / Apple Grade Modern Enterprise Interface (Zero Emojis, Zero Slop)
      ========================================================================== -->
 
 <div id="view-store-admin-dashboard" class="hidden">
   
-  <!-- 1. Store Header Banner & Store KPI Stats -->
+  <!-- 1. Store Header & KPI Stats -->
   <div class="store-banner-card">
     <div class="store-banner-top">
       <div style="min-width: 0; flex: 1;">
-        <span class="badge-role-store">STORE MANAGER</span>
-        <div id="mgr-banner-store-name" class="store-banner-title">My Mother Hub</div>
-        <div id="mgr-banner-store-radius" class="store-banner-sub">100m geofence verification</div>
+        <div id="mgr-banner-store-name" class="store-banner-title">Store Dashboard</div>
+        <!-- Peer Managers List on Same Store -->
+        <div id="mgr-banner-managers-wrap" class="store-managers-wrap">
+          <span id="mgr-banner-managers-list" class="store-managers-tags">Loading managers...</span>
+        </div>
       </div>
       <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
         Refresh
@@ -20,15 +22,15 @@
 
     <div class="store-kpi-row">
       <div class="store-kpi-tile">
-        <div class="store-kpi-label">CHECKED IN</div>
+        <div class="store-kpi-label">Checked In</div>
         <div id="mgr-kpi-in" class="store-kpi-value text-green">0</div>
       </div>
       <div class="store-kpi-tile">
-        <div class="store-kpi-label">CHECKED OUT</div>
+        <div class="store-kpi-label">Checked Out</div>
         <div id="mgr-kpi-out" class="store-kpi-value text-orange">0</div>
       </div>
       <div class="store-kpi-tile">
-        <div class="store-kpi-label">STORE STAFF</div>
+        <div class="store-kpi-label">Store Staff</div>
         <div id="mgr-kpi-staff" class="store-kpi-value">0</div>
       </div>
     </div>
@@ -37,55 +39,81 @@
   <!-- 2. Segmented Navigation Bar -->
   <div class="admin-tab-bar">
     <button type="button" id="mgr-tab-btn-logs" class="admin-tab-btn active" onclick="switchStoreAdminTab('logs')">
-      Store Attendance
+      Attendance
     </button>
     <button type="button" id="mgr-tab-btn-staff" class="admin-tab-btn" onclick="switchStoreAdminTab('staff')">
-      Manage Store Staff
+      Staff Roster
     </button>
   </div>
 
-  <!-- ========================================================================
-       TAB 1: STORE ATTENDANCE (SCOPED TO STORE X)
-       ======================================================================== -->
+  <!-- TAB 1: STORE ATTENDANCE -->
   <div id="mgr-tab-logs" class="mgr-tab-content">
     <div class="ui-card">
-      <div class="card-header-row" style="margin-bottom: 0.85rem;">
-        <div>
-          <div class="card-heading">Store Attendance Feed</div>
-          <div class="card-subheading">Ground staff check-ins strictly for this hub</div>
-        </div>
+      <div class="card-header-row" style="margin-bottom: 0.85rem; align-items: center;">
+        <div class="card-heading">Store Attendance</div>
         <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
           Refresh
         </button>
       </div>
 
-      <!-- Live Attendance Feed for Store X -->
-      <div id="mgr-logs-feed" class="card-list">
-        <div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">
-          Loading store attendance records...
+      <!-- Date Presets & Filter Toolbar -->
+      <div class="date-filter-toolbar">
+        <div class="preset-pills-row">
+          <button type="button" class="preset-pill active" onclick="handleStoreAdminDatePreset('TODAY')">Today</button>
+          <button type="button" class="preset-pill" onclick="handleStoreAdminDatePreset('YESTERDAY')">Yesterday</button>
+          <button type="button" class="preset-pill" onclick="handleStoreAdminDatePreset('WEEK')">This Week</button>
+          <button type="button" class="preset-pill" onclick="handleStoreAdminDatePreset('MONTH')">This Month</button>
+          <button type="button" class="preset-pill" onclick="handleStoreAdminDatePreset('ALL')">All Time</button>
+        </div>
+
+        <div class="date-controls-row">
+          <div class="date-input-group">
+            <label class="ui-label-xs" for="mgr-filter-start-date">From</label>
+            <input type="date" id="mgr-filter-start-date" class="ui-date-input" onchange="handleStoreAdminDateRangeChange()">
+          </div>
+          <div class="date-input-group">
+            <label class="ui-label-xs" for="mgr-filter-end-date">To</label>
+            <input type="date" id="mgr-filter-end-date" class="ui-date-input" onchange="handleStoreAdminDateRangeChange()">
+          </div>
+          <div class="sort-select-group">
+            <label class="ui-label-xs" for="mgr-sort-select">Sort</label>
+            <select id="mgr-sort-select" class="ui-select ui-select-sm" onchange="handleStoreAdminSortChange()">
+              <option value="TIME_DESC">Check-In Time (Latest First)</option>
+              <option value="TIME_ASC">Check-In Time (Earliest First)</option>
+              <option value="NAME_ASC">Staff Name (A to Z)</option>
+              <option value="NAME_DESC">Staff Name (Z to A)</option>
+              <option value="DURATION_DESC">Hours Worked (Longest First)</option>
+            </select>
+          </div>
+          <div class="search-input-group" style="flex: 1; min-width: 160px;">
+            <label class="ui-label-xs" for="mgr-search-logs">Search</label>
+            <input type="text" id="mgr-search-logs" class="ui-input ui-input-sm" placeholder="Search staff name..." oninput="handleStoreAdminSearchChange()">
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Attendance Date-Grouped Accordion Feed -->
+      <div id="mgr-logs-feed" class="card-list" style="margin-top: 1rem;">
+        <div style="text-align: center; padding: 2.5rem; font-size: 0.82rem; color: var(--text-muted);">
+          Loading attendance records...
         </div>
       </div>
     </div>
   </div>
 
-  <!-- ========================================================================
-       TAB 2: MANAGE STORE STAFF (DESKTOP SPLIT LAYOUT)
-       ======================================================================== -->
+  <!-- TAB 2: MANAGE STORE STAFF -->
   <div id="mgr-tab-staff" class="mgr-tab-content hidden">
     <div class="desktop-split-layout">
       
       <!-- Left Column: Add Staff Card -->
       <div class="ui-card">
         <div class="card-header-row">
-          <div>
-            <div class="card-heading">Add Staff to Store</div>
-            <div class="card-subheading">Auto-assigned to this hub and reporting line</div>
-          </div>
+          <div class="card-heading">Add Staff Member</div>
         </div>
 
         <form id="form-mgr-add-staff" onsubmit="handleStoreAdminAddStaff(event)">
           <div style="margin-bottom: 0.75rem;">
-            <label class="ui-label" for="mgr-staff-email">Staff Google Account Email</label>
+            <label class="ui-label" for="mgr-staff-email">Staff Google Email</label>
             <input type="email" id="mgr-staff-email" class="ui-input" placeholder="colleague@gmail.com" required>
           </div>
 
@@ -96,30 +124,27 @@
             </div>
             <div>
               <label class="ui-label" for="mgr-staff-code">Employee ID</label>
-              <input type="text" id="mgr-staff-code" class="ui-input" placeholder="Auto-generated if blank">
+              <input type="text" id="mgr-staff-code" class="ui-input" placeholder="Optional">
             </div>
           </div>
 
           <button type="submit" id="btn-mgr-add-staff-submit" class="btn-primary">
-            Add Staff to Store
+            Add to Store Roster
           </button>
         </form>
       </div>
 
-      <!-- Right Column: Store Roster List (Responsive Multi-Column Grid on Desktop) -->
+      <!-- Right Column: Store Roster List -->
       <div class="ui-card">
-        <div class="card-header-row">
-          <div>
-            <div class="card-heading">Store Staff Roster</div>
-            <div class="card-subheading">Ground team members assigned to this hub</div>
-          </div>
+        <div class="card-header-row" style="align-items: center;">
+          <div class="card-heading">Staff Roster</div>
           <button type="button" class="btn-secondary btn-sm" onclick="handleRefreshCurrentView()">
             Refresh
           </button>
         </div>
 
         <div id="mgr-staff-list" class="card-list grid-responsive">
-          <div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">
+          <div style="text-align: center; padding: 2rem; font-size: 0.82rem; color: var(--text-muted);">
             Loading staff roster...
           </div>
         </div>

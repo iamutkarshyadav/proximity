@@ -14,7 +14,7 @@ const Database = {
 
   STORES_HEADERS: [
     "Store_ID", "Store_Name", "Latitude", "Longitude", "Radius_Meters",
-    "Primary_Admin_Email", "Status", "Created_By", "Created_At"
+    "Primary_Admin_Email", "Status", "Created_By", "Created_At", "Manager_Emails"
   ],
 
   USERS_HEADERS: [
@@ -27,7 +27,8 @@ const Database = {
     "Log_ID", "Timestamp", "Email", "Full_Name", "Employee_Code",
     "Store_ID", "Store_Name", "Reporting_Manager_Email",
     "Check_Type", "User_Lat", "User_Lng", "Calculated_Distance_Meters",
-    "GPS_Accuracy_Meters", "Device_Type", "Selfie_Drive_URL", "Verification_Status"
+    "GPS_Accuracy_Meters", "Device_Type", "Selfie_Drive_URL", "Verification_Status",
+    "Session_ID", "Work_Duration_Minutes"
   ],
 
   DEFAULT_SUPER_ADMIN_EMAIL: "superadmin@example.com",
@@ -52,9 +53,6 @@ const Database = {
     if (sheetId) {
       try {
         const ss = SpreadsheetApp.openById(sheetId);
-        try {
-          DriveApp.getFileById(sheetId).setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
-        } catch (shareErr1) {}
         return ss;
       } catch (e) {
         Logger.log("Configured spreadsheet inaccessible, auto-locating: " + e.message);
@@ -70,9 +68,6 @@ const Database = {
           try {
             const ss = SpreadsheetApp.openById(file.getId());
             props.setProperty('SPREADSHEET_ID', file.getId());
-            try {
-              file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
-            } catch (shareErr2) {}
             return ss;
           } catch (openErr) {
             Logger.log("File found but open failed: " + openErr.message);
@@ -86,10 +81,6 @@ const Database = {
     try {
       const newSs = SpreadsheetApp.create(this.DEFAULT_DB_NAME);
       props.setProperty('SPREADSHEET_ID', newSs.getId());
-      try {
-        const newFile = DriveApp.getFileById(newSs.getId());
-        newFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
-      } catch (shareErr3) {}
       this.ensureInitialized(newSs.getId());
       return newSs;
     } catch (createErr) {
@@ -138,11 +129,6 @@ const Database = {
     }
 
     if (!ss) throw new Error("Could not access or initialize database spreadsheet.");
-
-    try {
-      const ssFile = DriveApp.getFileById(ss.getId());
-      ssFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
-    } catch (shareErr) {}
 
     // 1. Stores Tab (Migrate from Hubs if present)
     let storesSheet = ss.getSheetByName(this.TAB_STORES);
@@ -412,7 +398,7 @@ const Database = {
   },
 
   /**
-   * Retrieves all stores (with optional inactive filter)
+   * Retrieves all stores (with optional inactive filter and populated manager roster)
    */
   getAllStores: function(includeInactive) {
     const sheet = this.getTab(this.TAB_STORES);
@@ -427,13 +413,20 @@ const Database = {
       const isInactive = (statusStr === "INACTIVE" || statusStr === "FALSE" || statusRaw === false);
       
       if (includeInactive || !isInactive) {
+        const storeId = String(row[0]).trim();
+        const primaryEmail = String(row[5] || "").trim().toLowerCase();
+        const managerEmailsRaw = String(row[9] || "").trim();
+        const managers = this.getStoreManagers(storeId, primaryEmail);
+
         stores.push({
-          storeId: String(row[0]).trim(),
+          storeId: storeId,
           storeName: String(row[1]).trim(),
           latitude: Number(row[2]),
           longitude: Number(row[3]),
           radiusMeters: Number(row[4]) || 100,
-          primaryAdminEmail: String(row[5] || "").trim(),
+          primaryAdminEmail: primaryEmail,
+          managerEmails: managerEmailsRaw,
+          managers: managers,
           status: isInactive ? "INACTIVE" : "ACTIVE",
           createdBy: String(row[7] || ""),
           createdAt: row[8] || ""
@@ -466,14 +459,21 @@ const Database = {
         const rawStatus = data[i][6];
         const statusStr = String(rawStatus !== undefined && rawStatus !== null ? rawStatus : "").trim().toUpperCase();
         const isInactive = (statusStr === "INACTIVE" || statusStr === "FALSE" || rawStatus === false);
+        const storeId = String(data[i][0]).trim();
+        const primaryEmail = String(data[i][5] || "").trim().toLowerCase();
+        const managerEmailsRaw = String(data[i][9] || "").trim();
+        const managers = this.getStoreManagers(storeId, primaryEmail);
+
         return {
           rowIndex: i + 1,
-          storeId: String(data[i][0]).trim(),
+          storeId: storeId,
           storeName: String(data[i][1]).trim(),
           latitude: Number(data[i][2]),
           longitude: Number(data[i][3]),
           radiusMeters: Number(data[i][4]) || 100,
-          primaryAdminEmail: String(data[i][5] || "").trim(),
+          primaryAdminEmail: primaryEmail,
+          managerEmails: managerEmailsRaw,
+          managers: managers,
           status: isInactive ? "INACTIVE" : "ACTIVE",
           createdBy: String(data[i][7] || ""),
           createdAt: data[i][8] || ""
@@ -481,6 +481,175 @@ const Database = {
       }
     }
     return null;
+  },
+
+  /**
+   * Retrieves all managers assigned to a store (supports multiple managers)
+   */
+  getStoreManagers: function(storeId, optionalPrimaryEmail) {
+    if (!storeId) return [];
+    const allUsers = this.getAllUsers();
+    const cleanId = String(storeId).trim().toUpperCase();
+    const primaryEmail = optionalPrimaryEmail ? String(optionalPrimaryEmail).trim().toLowerCase() : "";
+
+    const managers = [];
+    const seenEmails = {};
+
+    allUsers.forEach(u => {
+      const uEmail = String(u.email || "").trim().toLowerCase();
+      const uStore = String(u.assignedStoreId || "").trim().toUpperCase();
+      const uRole = String(u.role || "").trim().toUpperCase();
+      const isStoreAdmin = (uRole === 'STORE_ADMIN' || uRole === 'SUPER_ADMIN');
+
+      if (isStoreAdmin && uStore === cleanId && u.status === 'ACTIVE') {
+        seenEmails[uEmail] = true;
+        managers.push({
+          userId: u.userId,
+          email: uEmail,
+          fullName: u.fullName || uEmail,
+          employeeCode: u.employeeCode || "MGR",
+          role: u.role,
+          isPrimary: (uEmail === primaryEmail),
+          status: u.status
+        });
+      }
+    });
+
+    // If primary admin email is set on store but not in Users as STORE_ADMIN, ensure included
+    if (primaryEmail && !seenEmails[primaryEmail]) {
+      const pUser = this.findUserByEmail(primaryEmail);
+      managers.unshift({
+        userId: pUser ? pUser.userId : "USR-PRIMARY",
+        email: primaryEmail,
+        fullName: pUser ? pUser.fullName : "Primary Manager",
+        employeeCode: pUser ? pUser.employeeCode : "MGR-001",
+        role: "STORE_ADMIN",
+        isPrimary: true,
+        status: pUser ? pUser.status : "ACTIVE"
+      });
+    }
+
+    return managers;
+  },
+
+  /**
+   * Adds or promotes a manager to an existing store (Multi-Manager)
+   */
+  addStoreManager: function(storeId, email, fullName, employeeCode, isPrimary, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const cleanEmail = String(email).trim().toLowerCase();
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found: " + storeId);
+
+      let user = this.findUserByEmail(cleanEmail);
+      if (user) {
+        this.updateUser(cleanEmail, {
+          role: "STORE_ADMIN",
+          assignedStoreId: store.storeId,
+          fullName: fullName ? fullName.trim() : user.fullName,
+          status: "ACTIVE"
+        });
+      } else {
+        const empCode = employeeCode ? employeeCode.trim().toUpperCase() : ("MGR-" + Math.floor(1000 + Math.random() * 9000));
+        this.insertUser({
+          email: cleanEmail,
+          fullName: fullName ? fullName.trim() : "Store Manager",
+          employeeCode: empCode,
+          role: "STORE_ADMIN",
+          assignedStoreId: store.storeId,
+          reportingManagerEmail: callerEmail || "",
+          status: "ACTIVE"
+        });
+      }
+
+      // If isPrimary or store has no primary admin, set primary
+      if (isPrimary || !store.primaryAdminEmail) {
+        this.setPrimaryStoreManager(store.storeId, cleanEmail);
+      }
+
+      this.syncStoreManagerEmails(store.storeId);
+      return this.getStoreById(store.storeId);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Removes a manager from a store
+   */
+  removeStoreManager: function(storeId, email, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const cleanEmail = String(email).trim().toLowerCase();
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found.");
+
+      const user = this.findUserByEmail(cleanEmail);
+      if (user && String(user.assignedStoreId).trim().toUpperCase() === String(store.storeId).trim().toUpperCase()) {
+        this.updateUser(cleanEmail, {
+          assignedStoreId: "",
+          status: "INACTIVE"
+        });
+      }
+
+      // If removed user was primary, reassign primary to another manager if available
+      const remainingManagers = this.getStoreManagers(store.storeId);
+      const remainingActive = remainingManagers.filter(m => m.email !== cleanEmail);
+      const nextPrimary = remainingActive.length > 0 ? remainingActive[0].email : "";
+
+      if (store.primaryAdminEmail === cleanEmail) {
+        this.setPrimaryStoreManager(store.storeId, nextPrimary);
+      }
+
+      this.syncStoreManagerEmails(store.storeId);
+      return this.getStoreById(store.storeId);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Sets the designated primary manager for a store
+   */
+  setPrimaryStoreManager: function(storeId, email) {
+    const store = this.getStoreById(storeId);
+    if (!store) return null;
+    const cleanEmail = String(email || "").trim().toLowerCase();
+    const sheet = this.getTab(this.TAB_STORES);
+    sheet.getRange(store.rowIndex, 6).setValue(cleanEmail);
+    this.syncStoreManagerEmails(storeId);
+    return this.getStoreById(storeId);
+  },
+
+  /**
+   * Synchronizes the Manager_Emails column in the Stores sheet
+   */
+  syncStoreManagerEmails: function(storeId) {
+    const store = this.getStoreById(storeId);
+    if (!store) return;
+    const sheet = this.getTab(this.TAB_STORES);
+    const lastCol = sheet.getLastColumn();
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+    let colIdx = headers.indexOf("Manager_Emails") + 1;
+
+    // If Manager_Emails column missing, append it
+    if (colIdx <= 0) {
+      sheet.getRange(1, lastCol + 1).setValue("Manager_Emails");
+      colIdx = lastCol + 1;
+    }
+
+    const managers = this.getStoreManagers(store.storeId);
+    const emailList = managers.map(m => m.email).join(", ");
+    sheet.getRange(store.rowIndex, colIdx).setValue(emailList);
   },
 
   /**
@@ -502,43 +671,53 @@ const Database = {
   },
 
   /**
-   * Upserts a store (Create if new, Update if Store_ID matches)
+   * Upserts a store (Create if new, Update if Store_ID matches) with lock protection
    */
   upsertStore: function(storeData, creatorEmail) {
-    const sheet = this.getTab(this.TAB_STORES);
-    const data = sheet.getDataRange().getValues();
-    let targetRow = -1;
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
 
-    if (storeData.storeId) {
-      for (let i = 1; i < data.length; i++) {
-        if (String(data[i][0]).toUpperCase() === String(storeData.storeId).toUpperCase()) {
-          targetRow = i + 1;
-          break;
+    try {
+      const sheet = this.getTab(this.TAB_STORES);
+      const data = sheet.getDataRange().getValues();
+      let targetRow = -1;
+
+      if (storeData.storeId) {
+        for (let i = 1; i < data.length; i++) {
+          if (String(data[i][0]).toUpperCase() === String(storeData.storeId).toUpperCase()) {
+            targetRow = i + 1;
+            break;
+          }
         }
       }
+
+      const storeId = (targetRow > 0 && storeData.storeId) ? storeData.storeId : (storeData.storeId || this.getNextStoreId());
+      const now = new Date().toISOString();
+
+      const rowValues = [
+        storeId,
+        storeData.storeName,
+        Number(storeData.latitude),
+        Number(storeData.longitude),
+        Number(storeData.radiusMeters) || 100,
+        storeData.primaryAdminEmail ? storeData.primaryAdminEmail.trim().toLowerCase() : "",
+        storeData.status || "ACTIVE",
+        creatorEmail || "SUPER_ADMIN",
+        now,
+        storeData.managerEmails || ""
+      ];
+
+      if (targetRow > 0) {
+        sheet.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
+      } else {
+        sheet.appendRow(rowValues);
+      }
+      return storeId;
+    } finally {
+      lock.releaseLock();
     }
-
-    const storeId = (targetRow > 0 && storeData.storeId) ? storeData.storeId : (storeData.storeId || this.getNextStoreId());
-    const now = new Date().toISOString();
-
-    const rowValues = [
-      storeId,
-      storeData.storeName,
-      Number(storeData.latitude),
-      Number(storeData.longitude),
-      Number(storeData.radiusMeters) || 100,
-      storeData.primaryAdminEmail ? storeData.primaryAdminEmail.trim().toLowerCase() : "",
-      storeData.status || "ACTIVE",
-      creatorEmail || "SUPER_ADMIN",
-      now
-    ];
-
-    if (targetRow > 0) {
-      sheet.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
-    } else {
-      sheet.appendRow(rowValues);
-    }
-    return storeId;
   },
 
   /**
@@ -553,12 +732,60 @@ const Database = {
   },
 
   /**
-   * Appends an attendance record to Attendance_Logs
+   * Appends an attendance record with atomic session pairing & shift duration calculation
    */
   appendAttendanceLog: function(log) {
     const sheet = this.getTab(this.TAB_LOGS);
     const logId = "LOG-" + Utilities.getUuid().slice(0, 10).toUpperCase();
     const timestamp = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd'T'HH:mm:ssXXX");
+
+    let sessionId = log.sessionId || "";
+    let workDurationMinutes = (log.workDurationMinutes !== undefined && log.workDurationMinutes !== null && log.workDurationMinutes !== "") ? Number(log.workDurationMinutes) : "";
+
+    // Automatic Session Pairing for CHECK_OUT
+    if (log.checkType === 'CHECK_OUT') {
+      const data = sheet.getDataRange().getValues();
+      const emailNorm = String(log.email).trim().toLowerCase();
+      let openCheckInRow = -1;
+      let openCheckInTs = null;
+      let openCheckInSessionId = "";
+
+      // Scan backwards to find the user's latest unclosed CHECK_IN
+      for (let i = data.length - 1; i >= 1; i--) {
+        const rowEmail = String(data[i][2]).trim().toLowerCase();
+        const rowType = String(data[i][8]);
+        if (rowEmail === emailNorm) {
+          if (rowType === 'CHECK_IN') {
+            openCheckInRow = i + 1;
+            openCheckInTs = data[i][1];
+            openCheckInSessionId = data[i][16] || "";
+            break;
+          } else if (rowType === 'CHECK_OUT') {
+            // Already closed earlier shift
+            break;
+          }
+        }
+      }
+
+      if (openCheckInRow > 0 && openCheckInTs) {
+        sessionId = openCheckInSessionId || ("SES-" + Utilities.getUuid().slice(0, 8).toUpperCase());
+        const inDate = new Date(openCheckInTs);
+        const outDate = new Date();
+        workDurationMinutes = Math.max(0, Math.round((outDate.getTime() - inDate.getTime()) / 60000));
+
+        // If open check-in was missing sessionId, backfill it in column 17
+        if (!openCheckInSessionId && sheet.getLastColumn() >= 17) {
+          sheet.getRange(openCheckInRow, 17).setValue(sessionId);
+        }
+      } else {
+        sessionId = "SES-" + Utilities.getUuid().slice(0, 8).toUpperCase();
+        workDurationMinutes = 0;
+      }
+    } else if (log.checkType === 'CHECK_IN') {
+      if (!sessionId) {
+        sessionId = "SES-" + Utilities.getUuid().slice(0, 8).toUpperCase();
+      }
+    }
 
     const row = [
       logId,
@@ -576,11 +803,586 @@ const Database = {
       log.accuracyMeters,
       log.deviceType,
       log.selfieDriveUrl,
-      log.verificationStatus
+      log.verificationStatus,
+      sessionId,
+      workDurationMinutes
     ];
 
     sheet.appendRow(row);
     return logId;
+  },
+
+  /**
+   * Retrieves ground staff current real-time shift status & today's summary tracker
+   */
+  getUserShiftStatus: function(email) {
+    if (!email) {
+      return { status: 'NOT_CHECKED_IN', activeShift: null, todayShifts: [], totalTodayMinutes: 0, totalTodayFormatted: "0m" };
+    }
+
+    const sheet = this.getTab(this.TAB_LOGS);
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      return { status: 'NOT_CHECKED_IN', activeShift: null, todayShifts: [], totalTodayMinutes: 0, totalTodayFormatted: "0m" };
+    }
+
+    const emailNorm = String(email).trim().toLowerCase();
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+
+    const userLogs = [];
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][2]).trim().toLowerCase() === emailNorm) {
+        userLogs.push(this._formatLogRow(data[i]));
+      }
+    }
+
+    if (userLogs.length === 0) {
+      return { status: 'NOT_CHECKED_IN', activeShift: null, todayShifts: [], totalTodayMinutes: 0, totalTodayFormatted: "0m" };
+    }
+
+    const latest = userLogs[userLogs.length - 1];
+    let currentStatus = 'NOT_CHECKED_IN';
+    let activeShift = null;
+
+    if (latest.checkType === 'CHECK_IN') {
+      currentStatus = 'ON_DUTY';
+      const checkInDate = new Date(latest.timestamp);
+      const now = new Date();
+      const elapsedSeconds = Math.max(0, Math.floor((now.getTime() - checkInDate.getTime()) / 1000));
+      const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+
+      activeShift = {
+        logId: latest.logId,
+        sessionId: latest.sessionId,
+        storeId: latest.storeId,
+        storeName: latest.storeName,
+        checkInTimestamp: latest.timestamp,
+        checkInTimeFormatted: this._formatTimeOnly(latest.timestamp),
+        checkInPhotoUrl: latest.selfieDriveUrl,
+        distanceMeters: latest.distanceMeters,
+        accuracyMeters: latest.accuracyMeters,
+        elapsedSeconds: elapsedSeconds,
+        elapsedFormatted: this._formatDuration(elapsedMinutes)
+      };
+    } else if (latest.checkType === 'CHECK_OUT') {
+      const latestTs = String(latest.timestamp);
+      if (latestTs.startsWith(todayStr)) {
+        currentStatus = 'SHIFT_COMPLETED';
+      } else {
+        currentStatus = 'NOT_CHECKED_IN';
+      }
+    }
+
+    // Process all today's logs into paired shifts
+    const todayLogs = userLogs.filter(log => String(log.timestamp).startsWith(todayStr));
+    const todayShifts = [];
+    let totalTodayMinutes = 0;
+    let pendingIn = null;
+
+    todayLogs.forEach(log => {
+      if (log.checkType === 'CHECK_IN') {
+        if (pendingIn) {
+          todayShifts.push({
+            sessionId: pendingIn.sessionId,
+            storeId: pendingIn.storeId,
+            storeName: pendingIn.storeName,
+            checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+            checkInTimestamp: pendingIn.timestamp,
+            checkInPhotoUrl: pendingIn.selfieDriveUrl,
+            checkInDistance: pendingIn.distanceMeters,
+            checkOutTime: "Missing Check-Out",
+            checkOutTimestamp: "",
+            checkOutPhotoUrl: "",
+            checkOutDistance: null,
+            durationMinutes: 0,
+            durationFormatted: "Incomplete (Review Required)",
+            status: "INCOMPLETE",
+            verificationStatus: pendingIn.verificationStatus
+          });
+        }
+        pendingIn = log;
+      } else if (log.checkType === 'CHECK_OUT') {
+        if (pendingIn) {
+          const inDate = new Date(pendingIn.timestamp);
+          const outDate = new Date(log.timestamp);
+          const dur = Math.max(0, Math.round((outDate.getTime() - inDate.getTime()) / 60000));
+          totalTodayMinutes += dur;
+
+          todayShifts.push({
+            sessionId: log.sessionId || pendingIn.sessionId,
+            storeId: log.storeId || pendingIn.storeId,
+            storeName: log.storeName || pendingIn.storeName,
+            checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+            checkInTimestamp: pendingIn.timestamp,
+            checkInPhotoUrl: pendingIn.selfieDriveUrl,
+            checkInDistance: pendingIn.distanceMeters,
+            checkOutTime: this._formatTimeOnly(log.timestamp),
+            checkOutTimestamp: log.timestamp,
+            checkOutPhotoUrl: log.selfieDriveUrl,
+            checkOutDistance: log.distanceMeters,
+            durationMinutes: dur,
+            durationFormatted: this._formatDuration(dur),
+            status: "COMPLETED",
+            verificationStatus: log.verificationStatus
+          });
+          pendingIn = null;
+        } else {
+          todayShifts.push({
+            sessionId: log.sessionId,
+            storeId: log.storeId,
+            storeName: log.storeName,
+            checkInTime: "No Matching In",
+            checkInTimestamp: "",
+            checkInPhotoUrl: "",
+            checkInDistance: null,
+            checkOutTime: this._formatTimeOnly(log.timestamp),
+            checkOutTimestamp: log.timestamp,
+            checkOutPhotoUrl: log.selfieDriveUrl,
+            checkOutDistance: log.distanceMeters,
+            durationMinutes: 0,
+            durationFormatted: "--",
+            status: "UNMATCHED_CHECKOUT",
+            verificationStatus: log.verificationStatus
+          });
+        }
+      }
+    });
+
+    if (pendingIn) {
+      const inDate = new Date(pendingIn.timestamp);
+      const now = new Date();
+      const currElapsedMins = Math.max(0, Math.round((now.getTime() - inDate.getTime()) / 60000));
+
+      todayShifts.push({
+        sessionId: pendingIn.sessionId,
+        storeId: pendingIn.storeId,
+        storeName: pendingIn.storeName,
+        checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+        checkInTimestamp: pendingIn.timestamp,
+        checkInPhotoUrl: pendingIn.selfieDriveUrl,
+        checkInDistance: pendingIn.distanceMeters,
+        checkOutTime: "On Duty",
+        checkOutTimestamp: "",
+        checkOutPhotoUrl: "",
+        checkOutDistance: null,
+        durationMinutes: currElapsedMins,
+        durationFormatted: this._formatDuration(currElapsedMins) + " (In Progress)",
+        status: "ON_DUTY",
+        verificationStatus: pendingIn.verificationStatus
+      });
+    }
+
+    return {
+      status: currentStatus,
+      activeShift: activeShift,
+      todayShifts: todayShifts,
+      totalTodayMinutes: totalTodayMinutes,
+      totalTodayFormatted: this._formatDuration(totalTodayMinutes)
+    };
+  },
+
+  /**
+   * Retrieves personal paired attendance history grouped by date
+   */
+  getPairedUserHistory: function(email, limit) {
+    if (!email) return [];
+    const sheet = this.getTab(this.TAB_LOGS);
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) return [];
+
+    const emailNorm = String(email).trim().toLowerCase();
+    const userLogs = [];
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][2]).trim().toLowerCase() === emailNorm) {
+        userLogs.push(this._formatLogRow(data[i]));
+      }
+    }
+
+    if (userLogs.length === 0) return [];
+
+    const dateMap = {};
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+
+    userLogs.forEach(log => {
+      const datePart = String(log.timestamp).substring(0, 10);
+      if (!dateMap[datePart]) dateMap[datePart] = [];
+      dateMap[datePart].push(log);
+    });
+
+    const sortedDates = Object.keys(dateMap).sort().reverse();
+    const maxDays = limit || 15;
+    const history = [];
+
+    sortedDates.slice(0, maxDays).forEach(dateStr => {
+      const dayLogs = dateMap[dateStr];
+      const shifts = [];
+      let totalDayMinutes = 0;
+      let pendingIn = null;
+
+      dayLogs.forEach(log => {
+        if (log.checkType === 'CHECK_IN') {
+          if (pendingIn) {
+            shifts.push({
+              sessionId: pendingIn.sessionId,
+              storeId: pendingIn.storeId,
+              storeName: pendingIn.storeName,
+              checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+              checkInTimestamp: pendingIn.timestamp,
+              checkInPhotoUrl: pendingIn.selfieDriveUrl,
+              checkInDistance: pendingIn.distanceMeters,
+              checkOutTime: "Missing Check-Out",
+              checkOutTimestamp: "",
+              checkOutPhotoUrl: "",
+              checkOutDistance: null,
+              durationMinutes: 0,
+              durationFormatted: "Incomplete (Review Required)",
+              status: "INCOMPLETE",
+              verificationStatus: pendingIn.verificationStatus
+            });
+          }
+          pendingIn = log;
+        } else if (log.checkType === 'CHECK_OUT') {
+          if (pendingIn) {
+            const inDate = new Date(pendingIn.timestamp);
+            const outDate = new Date(log.timestamp);
+            const dur = Math.max(0, Math.round((outDate.getTime() - inDate.getTime()) / 60000));
+            totalDayMinutes += dur;
+
+            shifts.push({
+              sessionId: log.sessionId || pendingIn.sessionId,
+              storeId: log.storeId || pendingIn.storeId,
+              storeName: log.storeName || pendingIn.storeName,
+              checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+              checkInTimestamp: pendingIn.timestamp,
+              checkInPhotoUrl: pendingIn.selfieDriveUrl,
+              checkInDistance: pendingIn.distanceMeters,
+              checkOutTime: this._formatTimeOnly(log.timestamp),
+              checkOutTimestamp: log.timestamp,
+              checkOutPhotoUrl: log.selfieDriveUrl,
+              checkOutDistance: log.distanceMeters,
+              durationMinutes: dur,
+              durationFormatted: this._formatDuration(dur),
+              status: "COMPLETED",
+              verificationStatus: log.verificationStatus
+            });
+            pendingIn = null;
+          } else {
+            shifts.push({
+              sessionId: log.sessionId,
+              storeId: log.storeId,
+              storeName: log.storeName,
+              checkInTime: "No Matching In",
+              checkInTimestamp: "",
+              checkInPhotoUrl: "",
+              checkInDistance: null,
+              checkOutTime: this._formatTimeOnly(log.timestamp),
+              checkOutTimestamp: log.timestamp,
+              checkOutPhotoUrl: log.selfieDriveUrl,
+              checkOutDistance: log.distanceMeters,
+              durationMinutes: 0,
+              durationFormatted: "--",
+              status: "UNMATCHED_CHECKOUT",
+              verificationStatus: log.verificationStatus
+            });
+          }
+        }
+      });
+
+      if (pendingIn) {
+        const isToday = (dateStr === todayStr);
+        const inDate = new Date(pendingIn.timestamp);
+        const now = new Date();
+        const currElapsedMins = Math.max(0, Math.round((now.getTime() - inDate.getTime()) / 60000));
+
+        shifts.push({
+          sessionId: pendingIn.sessionId,
+          storeId: pendingIn.storeId,
+          storeName: pendingIn.storeName,
+          checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+          checkInTimestamp: pendingIn.timestamp,
+          checkInPhotoUrl: pendingIn.selfieDriveUrl,
+          checkInDistance: pendingIn.distanceMeters,
+          checkOutTime: isToday ? "On Duty" : "Missing Check-Out",
+          checkOutTimestamp: "",
+          checkOutPhotoUrl: "",
+          checkOutDistance: null,
+          durationMinutes: isToday ? currElapsedMins : 0,
+          durationFormatted: isToday ? (this._formatDuration(currElapsedMins) + " (On Duty)") : "Incomplete (Review Required)",
+          status: isToday ? "ON_DUTY" : "INCOMPLETE",
+          verificationStatus: pendingIn.verificationStatus
+        });
+      }
+
+      const dObj = new Date(dateStr + "T00:00:00");
+      const dateFormatted = !isNaN(dObj.getTime())
+        ? (dateStr === todayStr ? "Today · " : "") + Utilities.formatDate(dObj, "Asia/Kolkata", "EEEE, d MMM yyyy")
+        : dateStr;
+
+      history.push({
+        dateStr: dateStr,
+        dateFormatted: dateFormatted,
+        isToday: (dateStr === todayStr),
+        totalDayMinutes: totalDayMinutes,
+        totalDayFormatted: this._formatDuration(totalDayMinutes),
+        shifts: shifts
+      });
+    });
+
+    return history;
+  },
+
+  /**
+   * Advanced Date-Grouped Hierarchical Attendance Ledger for Managers & Super Admins
+   */
+  getDateGroupedAttendanceLogs: function(callerRole, callerStoreId, callerEmail, filterStoreId, startDate, endDate, sortKey, sortOrder, limit) {
+    const sheet = this.getTab(this.TAB_LOGS);
+    const data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      return { success: true, dateGroups: [], totalRecords: 0 };
+    }
+
+    const callerEmailNorm = String(callerEmail || "").trim().toLowerCase();
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+
+    // Filter logs by caller permissions, store filter, and date range
+    const filteredLogs = [];
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const logStoreId = String(row[5] || "").trim();
+      const logManagerEmail = String(row[7] || "").trim().toLowerCase();
+      const ts = String(row[1] || "");
+      const datePart = ts.substring(0, 10);
+
+      // 1. Role Scoping
+      let isAllowed = false;
+      if (callerRole === "SUPER_ADMIN") {
+        if (!filterStoreId || filterStoreId === "ALL" || logStoreId === filterStoreId) {
+          isAllowed = true;
+        }
+      } else if (callerRole === "STORE_ADMIN") {
+        if (logStoreId === callerStoreId || logManagerEmail === callerEmailNorm) {
+          isAllowed = true;
+        }
+      }
+
+      if (!isAllowed) continue;
+
+      // 2. Date Range Filter
+      if (startDate && datePart < startDate) continue;
+      if (endDate && datePart > endDate) continue;
+
+      filteredLogs.push(this._formatLogRow(row));
+    }
+
+    if (filteredLogs.length === 0) {
+      return { success: true, dateGroups: [], totalRecords: 0 };
+    }
+
+    // Group logs by Date
+    const dateMap = {};
+    filteredLogs.forEach(log => {
+      const datePart = String(log.timestamp).substring(0, 10);
+      if (!dateMap[datePart]) dateMap[datePart] = [];
+      dateMap[datePart].push(log);
+    });
+
+    const dateGroups = [];
+    const dates = Object.keys(dateMap);
+
+    // Date Sorting
+    const isDateAsc = (sortOrder === 'ASC' && (!sortKey || sortKey === 'DATE'));
+    dates.sort((a, b) => isDateAsc ? a.localeCompare(b) : b.localeCompare(a));
+
+    dates.forEach(dateStr => {
+      const dayLogs = dateMap[dateStr];
+      const userMap = {};
+
+      dayLogs.forEach(log => {
+        const uEmail = String(log.email).trim().toLowerCase();
+        if (!userMap[uEmail]) userMap[uEmail] = [];
+        userMap[uEmail].push(log);
+      });
+
+      const dayRecords = [];
+      let totalDayMinutes = 0;
+      let completedCount = 0;
+      let onDutyCount = 0;
+      let incompleteCount = 0;
+      let flaggedCount = 0;
+      const presentEmails = new Set();
+
+      Object.keys(userMap).forEach(uEmail => {
+        const uLogs = userMap[uEmail];
+        presentEmails.add(uEmail);
+        let pendingIn = null;
+
+        uLogs.forEach(log => {
+          if (log.verificationStatus && log.verificationStatus.indexOf('FLAGGED') > -1) {
+            flaggedCount++;
+          }
+
+          if (log.checkType === 'CHECK_IN') {
+            if (pendingIn) {
+              incompleteCount++;
+              dayRecords.push({
+                sessionId: pendingIn.sessionId,
+                email: pendingIn.email,
+                fullName: pendingIn.fullName,
+                employeeCode: pendingIn.employeeCode,
+                storeId: pendingIn.storeId,
+                storeName: pendingIn.storeName,
+                checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+                checkInTimestamp: pendingIn.timestamp,
+                checkInPhotoUrl: pendingIn.selfieDriveUrl,
+                checkInDistance: pendingIn.distanceMeters,
+                checkOutTime: "Missing Check-Out",
+                checkOutTimestamp: "",
+                checkOutPhotoUrl: "",
+                checkOutDistance: null,
+                durationMinutes: 0,
+                durationFormatted: "Incomplete (Review Required)",
+                status: "INCOMPLETE",
+                verificationStatus: pendingIn.verificationStatus
+              });
+            }
+            pendingIn = log;
+          } else if (log.checkType === 'CHECK_OUT') {
+            if (pendingIn) {
+              const inDate = new Date(pendingIn.timestamp);
+              const outDate = new Date(log.timestamp);
+              const dur = Math.max(0, Math.round((outDate.getTime() - inDate.getTime()) / 60000));
+              totalDayMinutes += dur;
+              completedCount++;
+
+              dayRecords.push({
+                sessionId: log.sessionId || pendingIn.sessionId,
+                email: log.email,
+                fullName: log.fullName || pendingIn.fullName,
+                employeeCode: log.employeeCode || pendingIn.employeeCode,
+                storeId: log.storeId || pendingIn.storeId,
+                storeName: log.storeName || pendingIn.storeName,
+                checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+                checkInTimestamp: pendingIn.timestamp,
+                checkInPhotoUrl: pendingIn.selfieDriveUrl,
+                checkInDistance: pendingIn.distanceMeters,
+                checkOutTime: this._formatTimeOnly(log.timestamp),
+                checkOutTimestamp: log.timestamp,
+                checkOutPhotoUrl: log.selfieDriveUrl,
+                checkOutDistance: log.distanceMeters,
+                durationMinutes: dur,
+                durationFormatted: this._formatDuration(dur),
+                status: "COMPLETED",
+                verificationStatus: log.verificationStatus
+              });
+              pendingIn = null;
+            } else {
+              dayRecords.push({
+                sessionId: log.sessionId,
+                email: log.email,
+                fullName: log.fullName,
+                employeeCode: log.employeeCode,
+                storeId: log.storeId,
+                storeName: log.storeName,
+                checkInTime: "No Matching In",
+                checkInTimestamp: "",
+                checkInPhotoUrl: "",
+                checkInDistance: null,
+                checkOutTime: this._formatTimeOnly(log.timestamp),
+                checkOutTimestamp: log.timestamp,
+                checkOutPhotoUrl: log.selfieDriveUrl,
+                checkOutDistance: log.distanceMeters,
+                durationMinutes: 0,
+                durationFormatted: "--",
+                status: "UNMATCHED_CHECKOUT",
+                verificationStatus: log.verificationStatus
+              });
+            }
+          }
+        });
+
+        if (pendingIn) {
+          const isToday = (dateStr === todayStr);
+          if (isToday) onDutyCount++;
+          else incompleteCount++;
+
+          const inDate = new Date(pendingIn.timestamp);
+          const now = new Date();
+          const currElapsedMins = Math.max(0, Math.round((now.getTime() - inDate.getTime()) / 60000));
+
+          dayRecords.push({
+            sessionId: pendingIn.sessionId,
+            email: pendingIn.email,
+            fullName: pendingIn.fullName,
+            employeeCode: pendingIn.employeeCode,
+            storeId: pendingIn.storeId,
+            storeName: pendingIn.storeName,
+            checkInTime: this._formatTimeOnly(pendingIn.timestamp),
+            checkInTimestamp: pendingIn.timestamp,
+            checkInPhotoUrl: pendingIn.selfieDriveUrl,
+            checkInDistance: pendingIn.distanceMeters,
+            checkOutTime: isToday ? "On Duty" : "Missing Check-Out",
+            checkOutTimestamp: "",
+            checkOutPhotoUrl: "",
+            checkOutDistance: null,
+            durationMinutes: isToday ? currElapsedMins : 0,
+            durationFormatted: isToday ? (this._formatDuration(currElapsedMins) + " (In Progress)") : "Incomplete (Review Required)",
+            status: isToday ? "ON_DUTY" : "INCOMPLETE",
+            verificationStatus: pendingIn.verificationStatus
+          });
+        }
+      });
+
+      // Sort day records
+      if (sortKey === 'NAME') {
+        dayRecords.sort((a, b) => {
+          const nameA = (a.fullName || a.email).toLowerCase();
+          const nameB = (b.fullName || b.email).toLowerCase();
+          return sortOrder === 'DESC' ? nameB.localeCompare(nameA) : nameA.localeCompare(nameB);
+        });
+      } else if (sortKey === 'DURATION') {
+        dayRecords.sort((a, b) => {
+          return sortOrder === 'ASC' ? a.durationMinutes - b.durationMinutes : b.durationMinutes - a.durationMinutes;
+        });
+      } else {
+        // Default TIME (Check-In time)
+        dayRecords.sort((a, b) => {
+          const tA = a.checkInTimestamp || "";
+          const tB = b.checkInTimestamp || "";
+          return sortOrder === 'ASC' ? tA.localeCompare(tB) : tB.localeCompare(tA);
+        });
+      }
+
+      const dObj = new Date(dateStr + "T00:00:00");
+      const dateFormatted = !isNaN(dObj.getTime())
+        ? (dateStr === todayStr ? "Today · " : "") + Utilities.formatDate(dObj, "Asia/Kolkata", "EEEE, d MMM yyyy")
+        : dateStr;
+
+      dateGroups.push({
+        dateStr: dateStr,
+        dateFormatted: dateFormatted,
+        isToday: (dateStr === todayStr),
+        kpis: {
+          totalPresent: presentEmails.size,
+          completedShifts: completedCount,
+          activeOnDuty: onDutyCount,
+          incompleteShifts: incompleteCount,
+          flaggedPunches: flaggedCount,
+          totalHours: Math.round((totalDayMinutes / 60) * 10) / 10,
+          totalDurationFormatted: this._formatDuration(totalDayMinutes)
+        },
+        records: dayRecords
+      });
+    });
+
+    return {
+      success: true,
+      startDate: startDate || "",
+      endDate: endDate || "",
+      sortKey: sortKey || "DATE",
+      sortOrder: sortOrder || "DESC",
+      dateGroups: dateGroups,
+      totalRecords: filteredLogs.length
+    };
   },
 
   /**
@@ -755,6 +1557,21 @@ const Database = {
     };
   },
 
+  _formatTimeOnly: function(isoOrDateStr) {
+    if (!isoOrDateStr) return "--:--";
+    const d = new Date(isoOrDateStr);
+    if (isNaN(d.getTime())) return String(isoOrDateStr);
+    return Utilities.formatDate(d, "Asia/Kolkata", "hh:mm a");
+  },
+
+  _formatDuration: function(minutes) {
+    if (minutes === null || minutes === undefined || isNaN(minutes) || minutes < 0) return "--";
+    const hrs = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hrs === 0) return mins + "m";
+    return hrs + "h " + (mins < 10 ? "0" : "") + mins + "m";
+  },
+
   _formatLogRow: function(r) {
     return {
       logId: r[0],
@@ -772,7 +1589,9 @@ const Database = {
       accuracyMeters: r[12],
       deviceType: r[13],
       selfieDriveUrl: r[14],
-      verificationStatus: r[15]
+      verificationStatus: r[15],
+      sessionId: r[16] || "",
+      workDurationMinutes: (r[17] !== undefined && r[17] !== "" && r[17] !== null) ? Number(r[17]) : null
     };
   }
 };

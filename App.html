@@ -10,21 +10,111 @@
 var currentCheckType = 'CHECK_IN';
 var capturedSelfieBase64 = null;
 var toastTimer = null;
+var shiftStopwatchTimer = null;
+var shiftElapsedSeconds = 0;
 
 // Global cached data for Super Admin & Store Admin
 var cachedSuperAdminData = {
   kpis: null,
   stores: [],
-  logs: [],
+  dateAttendance: {
+    startDate: '',
+    endDate: '',
+    sortKey: 'TIME',
+    sortOrder: 'DESC',
+    dateGroups: [],
+    filterStoreId: 'ALL',
+    searchQuery: ''
+  },
   allUsers: []
 };
 
 var cachedStoreAdminData = {
   store: null,
   kpis: null,
-  logs: [],
+  dateAttendance: {
+    startDate: '',
+    endDate: '',
+    sortKey: 'TIME',
+    sortOrder: 'DESC',
+    dateGroups: [],
+    searchQuery: ''
+  },
   roster: []
 };
+
+/**
+ * XSS-Safe HTML Escaper
+ */
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+/**
+ * Date Preset Range Calculator
+ */
+function getDatePresetRange(preset) {
+  var now = new Date();
+  var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+  var formatDateStr = function(d) {
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  };
+
+  var todayStr = formatDateStr(now);
+
+  if (preset === 'TODAY') {
+    return { start: todayStr, end: todayStr };
+  } else if (preset === 'YESTERDAY') {
+    var yest = new Date(now.getTime() - 86400000);
+    var yStr = formatDateStr(yest);
+    return { start: yStr, end: yStr };
+  } else if (preset === 'WEEK') {
+    var weekAgo = new Date(now.getTime() - (6 * 86400000));
+    return { start: formatDateStr(weekAgo), end: todayStr };
+  } else if (preset === 'MONTH') {
+    var firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { start: formatDateStr(firstOfMonth), end: todayStr };
+  } else if (preset === 'ALL') {
+    return { start: '', end: '' };
+  }
+  return { start: todayStr, end: todayStr };
+}
+
+/**
+ * Live Ground Staff Stopwatch Controller
+ */
+function startShiftStopwatch(initialSeconds) {
+  stopShiftStopwatch();
+  shiftElapsedSeconds = initialSeconds || 0;
+  updateShiftStopwatchDisplay();
+  shiftStopwatchTimer = setInterval(function() {
+    shiftElapsedSeconds++;
+    updateShiftStopwatchDisplay();
+  }, 1000);
+}
+
+function stopShiftStopwatch() {
+  if (shiftStopwatchTimer) {
+    clearInterval(shiftStopwatchTimer);
+    shiftStopwatchTimer = null;
+  }
+}
+
+function updateShiftStopwatchDisplay() {
+  var el = document.getElementById('tracker-stopwatch');
+  if (!el) return;
+  var hrs = Math.floor(shiftElapsedSeconds / 3600);
+  var mins = Math.floor((shiftElapsedSeconds % 3600) / 60);
+  var secs = shiftElapsedSeconds % 60;
+  var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+  el.textContent = pad(hrs) + ':' + pad(mins) + ':' + pad(secs);
+}
 
 /**
  * Safe helper to visually format store names by replacing underscores with spaces
@@ -518,7 +608,7 @@ function handleInitialData(resp) {
 
     cachedSuperAdminData.kpis = resp.kpis;
     cachedSuperAdminData.stores = resp.stores || [];
-    cachedSuperAdminData.logs = resp.logs || [];
+    cachedSuperAdminData.dateAttendance = resp.dateAttendance || { dateGroups: [] };
     cachedSuperAdminData.allUsers = resp.allUsers || [];
 
     renderSuperAdminUI();
@@ -531,18 +621,19 @@ function handleInitialData(resp) {
 
     cachedStoreAdminData.store = resp.store;
     cachedStoreAdminData.kpis = resp.kpis;
-    cachedStoreAdminData.logs = resp.logs || [];
+    cachedStoreAdminData.dateAttendance = resp.dateAttendance || { dateGroups: [] };
     cachedStoreAdminData.roster = resp.roster || [];
 
     renderStoreAdminUI();
   } else {
-    // Ground Staff (USER) - ONLY role that punches attendance
+    // Ground Staff (USER) - Live Shift Tracker & Paired Work History
     if (appContainer) appContainer.classList.remove('admin-mode');
     if (viewUser) viewUser.classList.remove('hidden');
 
     AppState.setState(function(s) {
       s.stores = resp.stores || [];
-      s.recentLogs = resp.recentLogs || [];
+      s.shiftStatus = resp.shiftStatus || s.shiftStatus;
+      s.pairedHistory = resp.pairedHistory || [];
     });
 
     GeoTracker.start();
@@ -589,13 +680,15 @@ function switchSuperAdminTab(tabName) {
 
 function reloadSuperAdminData(onComplete) {
   var callerEmail = getCurrentUserEmail();
+  var params = cachedSuperAdminData.dateAttendance || {};
+
   google.script.run
     .withSuccessHandler(function(resp) {
       if (onComplete) onComplete();
       if (resp && resp.success) {
         cachedSuperAdminData.kpis = resp.kpis;
         cachedSuperAdminData.stores = resp.stores || [];
-        cachedSuperAdminData.logs = resp.logs || [];
+        cachedSuperAdminData.dateAttendance = resp.dateAttendance || cachedSuperAdminData.dateAttendance;
         cachedSuperAdminData.allUsers = resp.allUsers || [];
         renderSuperAdminUI();
         showToast("Super Admin data refreshed.", "success");
@@ -605,7 +698,14 @@ function reloadSuperAdminData(onComplete) {
       if (onComplete) onComplete();
       showToast("Refresh error: " + (err.message || err), "error");
     })
-    .getSuperAdminDashboardData(callerEmail);
+    .getSuperAdminDashboardData(
+      callerEmail,
+      params.startDate,
+      params.endDate,
+      params.sortKey,
+      params.sortOrder,
+      params.filterStoreId
+    );
 }
 
 function renderSuperAdminUI() {
@@ -631,84 +731,263 @@ function renderSuperAdminUI() {
     var curVal = filterStoreSelect.value;
     var html = '<option value="ALL">All Stores</option>';
     cachedSuperAdminData.stores.forEach(function(s) {
-      html += '<option value="' + s.storeId + '">' + formatStoreName(s.storeName) + '</option>';
+      html += '<option value="' + escapeHtml(s.storeId) + '">' + escapeHtml(formatStoreName(s.storeName)) + '</option>';
     });
     filterStoreSelect.innerHTML = html;
-    filterStoreSelect.value = curVal || 'ALL';
+    filterStoreSelect.value = curVal || cachedSuperAdminData.dateAttendance.filterStoreId || 'ALL';
   }
 
   if (editUserStoreSelect) {
     var uHtml = '<option value="">None / Unassigned</option>';
     cachedSuperAdminData.stores.forEach(function(s) {
-      uHtml += '<option value="' + s.storeId + '">' + formatStoreName(s.storeName) + '</option>';
+      uHtml += '<option value="' + escapeHtml(s.storeId) + '">' + escapeHtml(formatStoreName(s.storeName)) + '</option>';
     });
     editUserStoreSelect.innerHTML = uHtml;
   }
 
-  // 3. Render Logs Feed
-  applySuperAdminLogsFilter();
+  // 3. Render Date-Grouped Attendance Feed
+  renderSuperAdminDateFeed();
 
-  // 4. Render Active Stores List
+  // 4. Render Active Stores List with Multi-Managers
   renderSuperAdminStoresList();
 
   // 5. Render All Users Directory
   applySuperAdminUsersFilter();
 }
 
-function applySuperAdminLogsFilter() {
-  var feedEl = document.getElementById('sa-logs-feed');
-  var storeFilter = document.getElementById('sa-filter-store') ? document.getElementById('sa-filter-store').value : 'ALL';
-  var searchFilter = document.getElementById('sa-search-logs') ? document.getElementById('sa-search-logs').value.trim().toLowerCase() : '';
-
-  if (!feedEl) return;
-
-  var logs = cachedSuperAdminData.logs || [];
-  var filtered = logs.filter(function(log) {
-    var matchStore = (storeFilter === 'ALL' || log.storeId === storeFilter);
-    var matchSearch = !searchFilter || 
-      (log.fullName && log.fullName.toLowerCase().indexOf(searchFilter) > -1) ||
-      (log.email && log.email.toLowerCase().indexOf(searchFilter) > -1) ||
-      (log.storeName && log.storeName.toLowerCase().indexOf(searchFilter) > -1);
-    return matchStore && matchSearch;
-  });
-
-  if (filtered.length === 0) {
-    feedEl.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No attendance records found.</div>';
+/**
+ * Shared Hierarchical Date-Grouped Accordion Renderer
+ */
+function renderDateGroupedAccordion(dateGroups, containerEl, isSuperAdmin, searchQuery) {
+  if (!containerEl) return;
+  if (!dateGroups || dateGroups.length === 0) {
+    containerEl.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No attendance records found for the selected date range.</div>';
     return;
   }
 
+  var query = String(searchQuery || '').trim().toLowerCase();
   var html = '';
-  filtered.forEach(function(log) {
-    var isCheckIn = (log.checkType === 'CHECK_IN');
-    var badgeClass = isCheckIn ? 'inside' : 'checking';
-    var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
-    var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
 
-    var dateObj = new Date(log.timestamp);
-    var timeFormatted = !isNaN(dateObj.getTime())
-      ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : log.timestamp;
+  dateGroups.forEach(function(dayGroup) {
+    var records = dayGroup.records || [];
+    if (query) {
+      records = records.filter(function(r) {
+        return (r.fullName && r.fullName.toLowerCase().indexOf(query) > -1) ||
+               (r.email && r.email.toLowerCase().indexOf(query) > -1) ||
+               (r.employeeCode && r.employeeCode.toLowerCase().indexOf(query) > -1) ||
+               (r.storeName && r.storeName.toLowerCase().indexOf(query) > -1);
+      });
+    }
 
-    var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm away' : '';
-    var displayStore = formatStoreName(log.storeName || 'Mother Hub');
-    var staffName = log.fullName || log.email.split('@')[0];
+    if (query && records.length === 0) return;
+
+    var k = dayGroup.kpis;
+    var todayPill = dayGroup.isToday ? '<span class="day-today-pill">TODAY</span>' : '';
+    var accordionId = 'date-acc-' + (isSuperAdmin ? 'sa-' : 'mgr-') + dayGroup.dateStr;
 
     html += 
-      '<div class="activity-card-item attendance-strip ' + itemCardClass + '">' +
-        '<div class="activity-row-top">' +
-          '<div class="activity-store-name"><strong>' + staffName + '</strong> · ' + displayStore + '</div>' +
-          '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+      '<div class="date-accordion-card">' +
+        '<div class="date-accordion-header" onclick="toggleDateAccordion(\'' + accordionId + '\')">' +
+          '<div class="date-header-left">' +
+            '<span class="date-accordion-title">' + escapeHtml(dayGroup.dateFormatted) + '</span>' +
+            todayPill +
+          '</div>' +
+          '<div class="date-header-kpis">' +
+            '<span class="day-kpi-badge kpi-present">Present: ' + k.totalPresent + '</span>' +
+            '<span class="day-kpi-badge kpi-done">Completed: ' + k.completedShifts + '</span>' +
+            (k.activeOnDuty > 0 ? '<span class="day-kpi-badge kpi-onduty">On Duty: ' + k.activeOnDuty + '</span>' : '') +
+            (k.incompleteShifts > 0 ? '<span class="day-kpi-badge kpi-incomplete">Review: ' + k.incompleteShifts + '</span>' : '') +
+            (k.flaggedPunches > 0 ? '<span class="day-kpi-badge kpi-flagged">Flagged: ' + k.flaggedPunches + '</span>' : '') +
+            '<span class="day-kpi-badge kpi-hours">' + k.totalHours + ' hrs</span>' +
+            '<span class="accordion-chevron" id="' + accordionId + '-chevron">▼</span>' +
+          '</div>' +
         '</div>' +
-        '<div class="activity-row-bottom">' +
-          '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
-          (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + staffName + ' · ' + badgeText + '\')">View Photo</button>' : '') +
+        '<div class="date-accordion-content" id="' + accordionId + '">' +
+          '<div class="date-records-table-wrap">' +
+            '<table class="date-ledger-table">' +
+              '<thead>' +
+                '<tr>' +
+                  '<th>STAFF MEMBER</th>' +
+                  (isSuperAdmin ? '<th>STORE</th>' : '') +
+                  '<th>CHECK-IN</th>' +
+                  '<th>CHECK-OUT</th>' +
+                  '<th>DURATION</th>' +
+                  '<th>VERIFICATION</th>' +
+                  '<th>PHOTOS</th>' +
+                '</tr>' +
+              '</thead>' +
+              '<tbody>';
+
+    records.forEach(function(rec) {
+      var isCheckInVerified = (rec.verificationStatus === 'VERIFIED');
+      var verBadgeClass = isCheckInVerified ? 'inside' : 'outside';
+      var verBadgeText = isCheckInVerified ? 'Verified' : 'Flagged';
+
+      var statusBadge = '';
+      if (rec.status === 'COMPLETED') {
+        statusBadge = '<span class="badge-status inside">Completed</span>';
+      } else if (rec.status === 'ON_DUTY') {
+        statusBadge = '<span class="badge-status inside">On Duty</span>';
+      } else if (rec.status === 'INCOMPLETE') {
+        statusBadge = '<span class="badge-status outside">Incomplete</span>';
+      } else {
+        statusBadge = '<span class="badge-status outside">Unmatched</span>';
+      }
+
+      var checkInCell = rec.checkInTime !== 'No Matching In'
+        ? '<span class="ledger-time">' + escapeHtml(rec.checkInTime) + '</span>' + (rec.checkInDistance !== null && rec.checkInDistance !== undefined ? ' <span class="ledger-sub">(' + Math.round(rec.checkInDistance) + 'm)</span>' : '')
+        : '<span class="ledger-sub">No Matching In</span>';
+
+      var checkOutCell = '';
+      if (rec.checkOutTime === 'On Duty') {
+        checkOutCell = '<span class="badge-status inside">On Duty</span>';
+      } else if (rec.checkOutTime === 'Missing Check-Out' || rec.status === 'INCOMPLETE') {
+        checkOutCell = '<span class="badge-status outside">Missing Check-Out</span>';
+      } else if (rec.checkOutTime && rec.checkOutTime !== '--:--') {
+        checkOutCell = '<span class="ledger-time">' + escapeHtml(rec.checkOutTime) + '</span>' + (rec.checkOutDistance !== null && rec.checkOutDistance !== undefined ? ' <span class="ledger-sub">(' + Math.round(rec.checkOutDistance) + 'm)</span>' : '');
+      } else {
+        checkOutCell = '<span class="ledger-sub">--</span>';
+      }
+
+      var photoBtn = '';
+      if (rec.checkInPhotoUrl && rec.checkOutPhotoUrl) {
+        photoBtn = '<button type="button" class="btn-secondary btn-xs" onclick="openDualPhotoModal(\'' + rec.checkInPhotoUrl + '\', \'' + rec.checkOutPhotoUrl + '\', \'' + escapeHtml(rec.fullName) + '\', \'' + escapeHtml(rec.checkInTime) + '\', \'' + escapeHtml(rec.checkOutTime) + '\')">View In & Out</button>';
+      } else if (rec.checkInPhotoUrl) {
+        photoBtn = '<button type="button" class="btn-secondary btn-xs" onclick="openPhotoModal(\'' + rec.checkInPhotoUrl + '\', \'' + escapeHtml(rec.fullName) + ' · Check-In\')">View Photo</button>';
+      } else if (rec.checkOutPhotoUrl) {
+        photoBtn = '<button type="button" class="btn-secondary btn-xs" onclick="openPhotoModal(\'' + rec.checkOutPhotoUrl + '\', \'' + escapeHtml(rec.fullName) + ' · Check-Out\')">View Photo</button>';
+      } else {
+        photoBtn = '<span class="ledger-sub">None</span>';
+      }
+
+      html += 
+        '<tr>' +
+          '<td>' +
+            '<div class="staff-cell-name"><strong>' + escapeHtml(rec.fullName || rec.email.split('@')[0]) + '</strong></div>' +
+            '<div class="staff-cell-sub">' + escapeHtml(rec.employeeCode || 'N/A') + ' · ' + escapeHtml(rec.email) + '</div>' +
+          '</td>' +
+          (isSuperAdmin ? '<td><span class="store-cell-badge">' + escapeHtml(formatStoreName(rec.storeName)) + '</span></td>' : '') +
+          '<td>' + checkInCell + '</td>' +
+          '<td>' + checkOutCell + '</td>' +
+          '<td><span class="badge-duration">' + escapeHtml(rec.durationFormatted) + '</span></td>' +
+          '<td>' + statusBadge + '</td>' +
+          '<td>' + photoBtn + '</td>' +
+        '</tr>';
+    });
+
+    html += 
+              '</tbody>' +
+            '</table>' +
+          '</div>' +
         '</div>' +
       '</div>';
   });
 
-  feedEl.innerHTML = html;
+  if (html === '') {
+    containerEl.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No matching attendance records found.</div>';
+  } else {
+    containerEl.innerHTML = html;
+  }
 }
 
+function toggleDateAccordion(id) {
+  var el = document.getElementById(id);
+  var chevron = document.getElementById(id + '-chevron');
+  if (!el) return;
+  if (el.classList.contains('collapsed')) {
+    el.classList.remove('collapsed');
+    if (chevron) chevron.textContent = '▼';
+  } else {
+    el.classList.add('collapsed');
+    if (chevron) chevron.textContent = '▶';
+  }
+}
+
+/**
+ * Super Admin: Date Presets & Filter Actions
+ */
+function handleSuperAdminDatePreset(preset) {
+  var buttons = document.querySelectorAll('#view-super-admin-dashboard .preset-pill');
+  buttons.forEach(function(btn) { btn.classList.remove('active'); });
+  if (window.event && window.event.target) window.event.target.classList.add('active');
+
+  var range = getDatePresetRange(preset);
+  var sInput = document.getElementById('sa-filter-start-date');
+  var eInput = document.getElementById('sa-filter-end-date');
+  if (sInput) sInput.value = range.start;
+  if (eInput) eInput.value = range.end;
+
+  cachedSuperAdminData.dateAttendance.startDate = range.start;
+  cachedSuperAdminData.dateAttendance.endDate = range.end;
+  fetchDateGroupedDataForSuperAdmin();
+}
+
+function handleSuperAdminFilterChange() {
+  var sel = document.getElementById('sa-filter-store');
+  cachedSuperAdminData.dateAttendance.filterStoreId = sel ? sel.value : 'ALL';
+  fetchDateGroupedDataForSuperAdmin();
+}
+
+function handleSuperAdminDateRangeChange() {
+  var sInput = document.getElementById('sa-filter-start-date');
+  var eInput = document.getElementById('sa-filter-end-date');
+  cachedSuperAdminData.dateAttendance.startDate = sInput ? sInput.value : '';
+  cachedSuperAdminData.dateAttendance.endDate = eInput ? eInput.value : '';
+  fetchDateGroupedDataForSuperAdmin();
+}
+
+function handleSuperAdminSortChange() {
+  var sel = document.getElementById('sa-sort-select');
+  if (!sel) return;
+  var parts = sel.value.split('_');
+  cachedSuperAdminData.dateAttendance.sortKey = parts[0];
+  cachedSuperAdminData.dateAttendance.sortOrder = parts[1];
+  fetchDateGroupedDataForSuperAdmin();
+}
+
+function handleSuperAdminSearchChange() {
+  var input = document.getElementById('sa-search-logs');
+  cachedSuperAdminData.dateAttendance.searchQuery = input ? input.value : '';
+  renderSuperAdminDateFeed();
+}
+
+function fetchDateGroupedDataForSuperAdmin() {
+  var feed = document.getElementById('sa-logs-feed');
+  if (feed) feed.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">Loading global attendance ledger...</div>';
+
+  var callerEmail = getCurrentUserEmail();
+  var params = {
+    callerEmail: callerEmail,
+    filterStoreId: cachedSuperAdminData.dateAttendance.filterStoreId || 'ALL',
+    startDate: cachedSuperAdminData.dateAttendance.startDate,
+    endDate: cachedSuperAdminData.dateAttendance.endDate,
+    sortKey: cachedSuperAdminData.dateAttendance.sortKey || 'TIME',
+    sortOrder: cachedSuperAdminData.dateAttendance.sortOrder || 'DESC'
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (resp && resp.success) {
+        cachedSuperAdminData.dateAttendance.dateGroups = resp.dateGroups || [];
+        renderSuperAdminDateFeed();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Failed to load attendance: " + (err.message || err), "error");
+    })
+    .getDateGroupedAttendance(params);
+}
+
+function renderSuperAdminDateFeed() {
+  var feedEl = document.getElementById('sa-logs-feed');
+  var groups = (cachedSuperAdminData.dateAttendance && cachedSuperAdminData.dateAttendance.dateGroups) || [];
+  var query = cachedSuperAdminData.dateAttendance.searchQuery || '';
+  renderDateGroupedAccordion(groups, feedEl, true, query);
+}
+
+/**
+ * Super Admin: Multi-Manager Stores Directory Renderer
+ */
 function renderSuperAdminStoresList() {
   var listEl = document.getElementById('sa-stores-list');
   if (!listEl) return;
@@ -724,21 +1003,38 @@ function renderSuperAdminStoresList() {
     var isInactive = (s.status === 'INACTIVE');
     var statusClass = isInactive ? 'outside' : 'inside';
     var statusText = isInactive ? 'INACTIVE' : 'ACTIVE';
-    var adminInfo = s.primaryAdminEmail ? s.primaryAdminEmail : 'Unassigned';
+
+    var managers = s.managers || [];
+    var mgrsHtml = '';
+    if (managers.length === 0) {
+      mgrsHtml = '<span style="font-size: 0.75rem; color: var(--ink-muted);">No managers assigned</span>';
+    } else {
+      managers.forEach(function(m) {
+        var isPrimary = (m.isPrimary || m.email === s.primaryAdminEmail);
+        mgrsHtml += 
+          '<span class="manager-pill ' + (isPrimary ? 'primary-mgr' : 'co-mgr') + '">' +
+            (isPrimary ? '[PRIMARY] ' : '') + escapeHtml(m.fullName || m.email) +
+            '<span class="mgr-email-sub"> (' + escapeHtml(m.email) + ')</span>' +
+          '</span> ';
+      });
+    }
 
     html += 
-      '<div class="activity-card-item" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
+      '<div class="activity-card-item store-card-box" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
         '<div class="activity-row-top">' +
-          '<div class="activity-store-name"><strong>' + formatStoreName(s.storeName) + '</strong> (' + s.storeId + ')</div>' +
+          '<div class="activity-store-name"><strong>' + escapeHtml(formatStoreName(s.storeName)) + '</strong> (' + escapeHtml(s.storeId) + ')</div>' +
           '<span class="badge-status ' + statusClass + '">' + statusText + '</span>' +
         '</div>' +
         '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.5rem; line-height: 1.4;">' +
-          'Coords: ' + s.latitude.toFixed(4) + ', ' + s.longitude.toFixed(4) + ' · Radius: ' + s.radiusMeters + 'm<br>' +
-          'Manager: <strong>' + adminInfo + '</strong>' +
+          'Coords: ' + s.latitude.toFixed(4) + ', ' + s.longitude.toFixed(4) + ' · Radius: ' + s.radiusMeters + 'm' +
         '</div>' +
-        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end;">' +
-          '<button type="button" class="btn-secondary btn-sm" onclick="openChangeAdminModal(\'' + s.storeId + '\', \'' + formatStoreName(s.storeName) + '\')">Assign Manager</button>' +
-          (!isInactive ? '<button type="button" class="btn-danger btn-sm" onclick="handleDeactivateStore(\'' + s.storeId + '\', \'' + formatStoreName(s.storeName) + '\')">Deactivate</button>' : '') +
+        '<div class="store-managers-section">' +
+          '<div class="meta-label">ASSIGNED MANAGERS (' + managers.length + ')</div>' +
+          '<div class="store-managers-flow">' + mgrsHtml + '</div>' +
+        '</div>' +
+        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end; margin-top: 0.75rem;">' +
+          '<button type="button" class="btn-primary btn-sm" onclick="openManageManagersModal(\'' + s.storeId + '\')">Manage Managers</button>' +
+          (!isInactive ? '<button type="button" class="btn-danger btn-sm" onclick="handleDeactivateStore(\'' + s.storeId + '\', \'' + escapeHtml(formatStoreName(s.storeName)) + '\')">Deactivate</button>' : '') +
         '</div>' +
       '</div>';
   });
@@ -746,6 +1042,174 @@ function renderSuperAdminStoresList() {
   listEl.innerHTML = html;
 }
 
+/**
+ * Super Admin: Multi-Manager Modal Open & Actions
+ */
+function openManageManagersModal(storeId) {
+  var modal = document.getElementById('modal-change-admin');
+  var titleEl = document.getElementById('change-admin-store-title');
+  var storeIdInput = document.getElementById('change-admin-store-id');
+
+  var store = (cachedSuperAdminData.stores || []).find(function(s) { return s.storeId === storeId; });
+  if (!store) return;
+
+  if (titleEl) titleEl.textContent = "Manage Managers · " + formatStoreName(store.storeName) + " (" + store.storeId + ")";
+  if (storeIdInput) storeIdInput.value = store.storeId;
+
+  renderManageManagersModalList(store);
+
+  var emailInput = document.getElementById('add-mgr-email');
+  var nameInput = document.getElementById('add-mgr-name');
+  var codeInput = document.getElementById('add-mgr-code');
+  var primaryCheckbox = document.getElementById('add-mgr-is-primary');
+
+  if (emailInput) emailInput.value = '';
+  if (nameInput) nameInput.value = '';
+  if (codeInput) codeInput.value = '';
+  if (primaryCheckbox) primaryCheckbox.checked = false;
+
+  if (modal) modal.classList.remove('hidden');
+}
+
+function renderManageManagersModalList(store) {
+  var listEl = document.getElementById('manage-managers-list');
+  if (!listEl) return;
+
+  var managers = store.managers || [];
+  if (managers.length === 0) {
+    listEl.innerHTML = '<div style="font-size: 0.8rem; color: var(--ink-muted); padding: 0.5rem 0;">No managers currently assigned to this hub.</div>';
+    return;
+  }
+
+  var html = '';
+  managers.forEach(function(m) {
+    var isPrimary = (m.isPrimary || m.email === store.primaryAdminEmail);
+    html += 
+      '<div class="manager-item-row">' +
+        '<div class="mgr-item-left">' +
+          '<div class="mgr-item-name"><strong>' + escapeHtml(m.fullName || m.email) + '</strong> ' +
+            (isPrimary ? '<span class="badge-role-mgr">PRIMARY</span>' : '<span class="badge-role-store">CO-MANAGER</span>') +
+          '</div>' +
+          '<div class="mgr-item-email">' + escapeHtml(m.email) + ' (' + escapeHtml(m.employeeCode || 'MGR') + ')</div>' +
+        '</div>' +
+        '<div class="mgr-item-actions">' +
+          (!isPrimary ? '<button type="button" class="btn-secondary btn-xs" onclick="handleSetPrimaryManager(\'' + store.storeId + '\', \'' + m.email + '\')">Make Primary</button>' : '') +
+          '<button type="button" class="btn-danger btn-xs" onclick="handleRemoveManager(\'' + store.storeId + '\', \'' + m.email + '\')">Remove</button>' +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+function handleSuperAdminAddManager(e) {
+  e.preventDefault();
+  var storeId = document.getElementById('change-admin-store-id').value;
+  var email = document.getElementById('add-mgr-email').value;
+  var name = document.getElementById('add-mgr-name').value;
+  var code = document.getElementById('add-mgr-code').value;
+  var isPrimary = document.getElementById('add-mgr-is-primary').checked;
+  var btn = document.getElementById('btn-save-add-mgr');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Assigning...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add Manager to Store';
+      }
+      showToast("Store Manager added successfully.", "success");
+      document.getElementById('add-mgr-email').value = '';
+      document.getElementById('add-mgr-name').value = '';
+      document.getElementById('add-mgr-code').value = '';
+      document.getElementById('add-mgr-is-primary').checked = false;
+
+      if (resp && resp.success) {
+        cachedSuperAdminData.stores = resp.stores || [];
+        var updatedStore = cachedSuperAdminData.stores.find(function(s) { return s.storeId === storeId; });
+        if (updatedStore) renderManageManagersModalList(updatedStore);
+        renderSuperAdminStoresList();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add Manager to Store';
+      }
+      showToast("Failed to assign manager: " + (err.message || err), "error");
+    })
+    .assignStoreManager({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      managerEmail: email,
+      fullName: name,
+      employeeCode: code,
+      isPrimary: isPrimary
+    });
+}
+
+function handleSetPrimaryManager(storeId, email) {
+  var callerEmail = getCurrentUserEmail();
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      showToast("Primary manager updated.", "success");
+      if (resp && resp.success) {
+        cachedSuperAdminData.stores = resp.stores || [];
+        var updatedStore = cachedSuperAdminData.stores.find(function(s) { return s.storeId === storeId; });
+        if (updatedStore) renderManageManagersModalList(updatedStore);
+        renderSuperAdminStoresList();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Error updating primary manager: " + (err.message || err), "error");
+    })
+    .setPrimaryStoreManager({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      managerEmail: email
+    });
+}
+
+function handleRemoveManager(storeId, email) {
+  if (!confirm("Are you sure you want to remove " + email + " from this store?")) return;
+  var callerEmail = getCurrentUserEmail();
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      showToast("Manager removed from store.", "success");
+      if (resp && resp.success) {
+        cachedSuperAdminData.stores = resp.stores || [];
+        var updatedStore = cachedSuperAdminData.stores.find(function(s) { return s.storeId === storeId; });
+        if (updatedStore) renderManageManagersModalList(updatedStore);
+        renderSuperAdminStoresList();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Error removing manager: " + (err.message || err), "error");
+    })
+    .removeStoreManager({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      managerEmail: email
+    });
+}
+
+function closeChangeAdminModal() {
+  var modal = document.getElementById('modal-change-admin');
+  if (modal) modal.classList.add('hidden');
+}
+
+/**
+ * Super Admin: All Users Filter & Actions
+ */
 function applySuperAdminUsersFilter() {
   var listEl = document.getElementById('sa-users-list');
   var roleFilter = document.getElementById('sa-filter-user-role') ? document.getElementById('sa-filter-user-role').value : 'ALL';
@@ -780,12 +1244,12 @@ function applySuperAdminUsersFilter() {
     html += 
       '<div class="activity-card-item" style="background: #FFFFFF;">' +
         '<div class="activity-row-top">' +
-          '<div class="activity-store-name"><strong>' + (u.fullName || 'User') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + (u.employeeCode || 'N/A') + ')</span></div>' +
+          '<div class="activity-store-name"><strong>' + escapeHtml(u.fullName || 'User') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + escapeHtml(u.employeeCode || 'N/A') + ')</span></div>' +
           roleBadge +
         '</div>' +
         '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.4rem; line-height: 1.4;">' +
-          'Email: ' + u.email + '<br>' +
-          'Store: <strong>' + storeName + '</strong> · Status: <strong>' + u.status + '</strong>' +
+          'Email: ' + escapeHtml(u.email) + '<br>' +
+          'Store: <strong>' + escapeHtml(storeName) + '</strong> · Status: <strong>' + escapeHtml(u.status) + '</strong>' +
         '</div>' +
         '<div style="display: flex; justify-content: flex-end;">' +
           '<button type="button" class="btn-secondary btn-sm" onclick="openEditUserModal(\'' + u.email + '\')">Edit Access</button>' +
@@ -794,184 +1258,6 @@ function applySuperAdminUsersFilter() {
   });
 
   listEl.innerHTML = html;
-}
-
-/**
- * Super Admin: Use GPS for Add Store Form
- */
-function useCurrentLocationForStoreForm() {
-  if (!navigator.geolocation) {
-    showToast("Geolocation not supported.", "error");
-    return;
-  }
-  showToast("Getting current GPS location...", "info");
-  navigator.geolocation.getCurrentPosition(function(pos) {
-    var lat = pos.coords.latitude;
-    var lng = pos.coords.longitude;
-    var latEl = document.getElementById('sa-store-lat');
-    var lngEl = document.getElementById('sa-store-lng');
-    var locEl = document.getElementById('sa-store-location');
-
-    if (latEl) latEl.value = lat;
-    if (lngEl) lngEl.value = lng;
-    if (locEl) locEl.value = lat.toFixed(5) + ", " + lng.toFixed(5);
-    showToast("GPS coordinates set.", "success");
-  }, function(err) {
-    showToast("Location error: " + err.message, "error");
-  }, { enableHighAccuracy: true });
-}
-
-/**
- * Super Admin: Create Store Form Submit
- */
-function handleSuperAdminCreateStore(e) {
-  e.preventDefault();
-  var nameEl = document.getElementById('sa-store-name');
-  var locEl = document.getElementById('sa-store-location');
-  var latEl = document.getElementById('sa-store-lat');
-  var lngEl = document.getElementById('sa-store-lng');
-  var radEl = document.getElementById('sa-store-radius');
-  var admEl = document.getElementById('sa-admin-email');
-  var admNameEl = document.getElementById('sa-admin-name');
-  var btn = document.getElementById('btn-create-store-submit');
-  var origText = btn ? btn.textContent : '';
-  var callerEmail = getCurrentUserEmail();
-
-  if (btn) {
-    btn.disabled = true;
-    btn.classList.add('btn-loading');
-    btn.textContent = 'Creating Store...';
-  }
-
-  var payload = {
-    callerEmail: callerEmail,
-    storeName: nameEl ? nameEl.value : '',
-    locationInput: locEl ? locEl.value : '',
-    latitude: latEl ? latEl.value : '',
-    longitude: lngEl ? lngEl.value : '',
-    radiusMeters: radEl ? radEl.value : 100,
-    adminEmail: admEl ? admEl.value : '',
-    adminName: admNameEl ? admNameEl.value : ''
-  };
-
-  google.script.run
-    .withSuccessHandler(function(resp) {
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('btn-loading');
-        btn.textContent = origText || 'Create Store & Assign Admin';
-      }
-      if (resp && resp.success) {
-        showToast("Store created successfully.", "success");
-        if (nameEl) nameEl.value = '';
-        if (locEl) locEl.value = '';
-        if (admEl) admEl.value = '';
-        if (admNameEl) admNameEl.value = '';
-        cachedSuperAdminData.kpis = resp.kpis;
-        cachedSuperAdminData.stores = resp.stores || [];
-        cachedSuperAdminData.logs = resp.logs || [];
-        cachedSuperAdminData.allUsers = resp.allUsers || [];
-        renderSuperAdminUI();
-        LiveSync.triggerImmediate();
-      }
-    })
-    .withFailureHandler(function(err) {
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('btn-loading');
-        btn.textContent = origText || 'Create Store & Assign Admin';
-      }
-      showToast("Store creation error: " + (err.message || err), "error");
-    })
-    .createStoreAndAdmin(payload);
-}
-
-/**
- * Super Admin: Deactivate Store
- */
-function handleDeactivateStore(storeId, storeName) {
-  if (!confirm("Are you sure you want to deactivate " + storeName + "?")) return;
-  var callerEmail = getCurrentUserEmail();
-
-  google.script.run
-    .withSuccessHandler(function(resp) {
-      if (resp && resp.success) {
-        showToast(storeName + " deactivated.", "success");
-        cachedSuperAdminData.kpis = resp.kpis;
-        cachedSuperAdminData.stores = resp.stores || [];
-        renderSuperAdminUI();
-        LiveSync.triggerImmediate();
-      }
-    })
-    .withFailureHandler(function(err) {
-      showToast("Deactivate error: " + (err.message || err), "error");
-    })
-    .deactivateStore({ storeId: storeId, callerEmail: callerEmail });
-}
-
-/**
- * Super Admin: Change Store Admin Modal
- */
-function openChangeAdminModal(storeId, storeName) {
-  var modal = document.getElementById('modal-change-admin');
-  var titleEl = document.getElementById('change-admin-store-title');
-  var storeIdInput = document.getElementById('change-admin-store-id');
-  var emailInput = document.getElementById('change-admin-email');
-  var nameInput = document.getElementById('change-admin-name');
-
-  if (titleEl) titleEl.textContent = "Assign Manager for " + storeName;
-  if (storeIdInput) storeIdInput.value = storeId;
-  if (emailInput) emailInput.value = '';
-  if (nameInput) nameInput.value = '';
-  if (modal) modal.classList.remove('hidden');
-}
-
-function closeChangeAdminModal() {
-  var modal = document.getElementById('modal-change-admin');
-  if (modal) modal.classList.add('hidden');
-}
-
-function handleSuperAdminSubmitChangeAdmin(e) {
-  e.preventDefault();
-  var storeId = document.getElementById('change-admin-store-id').value;
-  var email = document.getElementById('change-admin-email').value;
-  var name = document.getElementById('change-admin-name').value;
-  var btn = document.getElementById('btn-save-change-admin');
-  var origText = btn ? btn.textContent : '';
-  var callerEmail = getCurrentUserEmail();
-
-  if (btn) {
-    btn.disabled = true;
-    btn.classList.add('btn-loading');
-    btn.textContent = 'Assigning Manager...';
-  }
-
-  google.script.run
-    .withSuccessHandler(function(resp) {
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('btn-loading');
-        btn.textContent = origText || 'Assign Manager';
-      }
-      closeChangeAdminModal();
-      showToast("Store Manager updated.", "success");
-      reloadSuperAdminData();
-      LiveSync.triggerImmediate();
-    })
-    .withFailureHandler(function(err) {
-      if (btn) {
-        btn.disabled = false;
-        btn.classList.remove('btn-loading');
-        btn.textContent = origText || 'Assign Manager';
-      }
-      showToast("Update error: " + (err.message || err), "error");
-    })
-    .changeStoreAdmin({
-      callerEmail: callerEmail,
-      storeId: storeId,
-      newAdminEmail: email,
-      fullName: name
-    });
 }
 
 /**
@@ -1073,13 +1359,15 @@ function switchStoreAdminTab(tabName) {
 
 function reloadStoreAdminData(onComplete) {
   var callerEmail = getCurrentUserEmail();
+  var params = cachedStoreAdminData.dateAttendance || {};
+
   google.script.run
     .withSuccessHandler(function(resp) {
       if (onComplete) onComplete();
       if (resp && resp.success) {
         cachedStoreAdminData.store = resp.store;
         cachedStoreAdminData.kpis = resp.kpis;
-        cachedStoreAdminData.logs = resp.logs || [];
+        cachedStoreAdminData.dateAttendance = resp.dateAttendance || cachedStoreAdminData.dateAttendance;
         cachedStoreAdminData.roster = resp.roster || [];
         renderStoreAdminUI();
         showToast("Store data refreshed.", "success");
@@ -1089,19 +1377,42 @@ function reloadStoreAdminData(onComplete) {
       if (onComplete) onComplete();
       showToast("Refresh error: " + (err.message || err), "error");
     })
-    .getStoreAdminDashboardData(callerEmail);
+    .getStoreAdminDashboardData(
+      callerEmail,
+      params.startDate,
+      params.endDate,
+      params.sortKey,
+      params.sortOrder
+    );
 }
 
 function renderStoreAdminUI() {
   var store = cachedStoreAdminData.store;
   var bannerName = document.getElementById('mgr-banner-store-name');
-  var bannerSub = document.getElementById('mgr-banner-store-radius');
+  var managersList = document.getElementById('mgr-banner-managers-list');
 
   if (bannerName) {
-    bannerName.textContent = store ? formatStoreName(store.storeName) : 'Assigned Mother Hub';
+    bannerName.textContent = store ? formatStoreName(store.storeName) : 'Store Dashboard';
   }
-  if (bannerSub && store) {
-    bannerSub.textContent = store.radiusMeters + 'm geofence verification boundary';
+
+  // Render Co-Managers in Banner
+  if (managersList && store) {
+    var managers = store.managers || [];
+    if (managers.length === 0) {
+      managersList.textContent = store.primaryAdminEmail || "You";
+    } else {
+      var currentEmail = getCurrentUserEmail();
+      var mHtml = '';
+      managers.forEach(function(m) {
+        var isMe = (m.email === currentEmail);
+        var isPrimary = (m.isPrimary || m.email === store.primaryAdminEmail);
+        mHtml += 
+          '<span class="manager-pill ' + (isPrimary ? 'primary-mgr' : 'co-mgr') + '">' +
+            (isPrimary ? '[PRIMARY] ' : '') + escapeHtml(m.fullName || m.email) + (isMe ? ' (You)' : '') +
+          '</span> ';
+      });
+      managersList.innerHTML = mHtml;
+    }
   }
 
   // KPIs
@@ -1116,69 +1427,114 @@ function renderStoreAdminUI() {
     if (elStaff) elStaff.textContent = k.totalStoreStaff;
   }
 
-  // Attendance Logs Feed (strictly for this store)
-  var logsFeed = document.getElementById('mgr-logs-feed');
-  if (logsFeed) {
-    var logs = cachedStoreAdminData.logs || [];
-    if (logs.length === 0) {
-      logsFeed.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">No attendance recorded for this store today.</div>';
-    } else {
-      var html = '';
-      logs.forEach(function(log) {
-        var isCheckIn = (log.checkType === 'CHECK_IN');
-        var badgeClass = isCheckIn ? 'inside' : 'checking';
-        var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
-        var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+  // Date-Grouped Attendance Feed
+  renderStoreAdminDateFeed();
 
-        var dateObj = new Date(log.timestamp);
-        var timeFormatted = !isNaN(dateObj.getTime())
-          ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : log.timestamp;
+  // Store Staff Roster
+  renderStoreAdminRosterList();
+}
 
-        var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm' : '';
-        var staffName = log.fullName || log.email.split('@')[0];
+/**
+ * Store Admin: Date Presets & Filter Actions
+ */
+function handleStoreAdminDatePreset(preset) {
+  var buttons = document.querySelectorAll('#view-store-admin-dashboard .preset-pill');
+  buttons.forEach(function(btn) { btn.classList.remove('active'); });
+  if (window.event && window.event.target) window.event.target.classList.add('active');
 
-        html += 
-          '<div class="activity-card-item attendance-strip ' + itemCardClass + '">' +
-            '<div class="activity-row-top">' +
-              '<div class="activity-store-name"><strong>' + staffName + '</strong></div>' +
-              '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
-            '</div>' +
-            '<div class="activity-row-bottom">' +
-              '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
-              (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + staffName + ' · ' + badgeText + '\')">View Photo</button>' : '') +
-            '</div>' +
-          '</div>';
-      });
-      logsFeed.innerHTML = html;
-    }
-  }
+  var range = getDatePresetRange(preset);
+  var sInput = document.getElementById('mgr-filter-start-date');
+  var eInput = document.getElementById('mgr-filter-end-date');
+  if (sInput) sInput.value = range.start;
+  if (eInput) eInput.value = range.end;
 
-  // Store Roster List
+  cachedStoreAdminData.dateAttendance.startDate = range.start;
+  cachedStoreAdminData.dateAttendance.endDate = range.end;
+  fetchDateGroupedDataForStoreAdmin();
+}
+
+function handleStoreAdminDateRangeChange() {
+  var sInput = document.getElementById('mgr-filter-start-date');
+  var eInput = document.getElementById('mgr-filter-end-date');
+  cachedStoreAdminData.dateAttendance.startDate = sInput ? sInput.value : '';
+  cachedStoreAdminData.dateAttendance.endDate = eInput ? eInput.value : '';
+  fetchDateGroupedDataForStoreAdmin();
+}
+
+function handleStoreAdminSortChange() {
+  var sel = document.getElementById('mgr-sort-select');
+  if (!sel) return;
+  var parts = sel.value.split('_');
+  cachedStoreAdminData.dateAttendance.sortKey = parts[0];
+  cachedStoreAdminData.dateAttendance.sortOrder = parts[1];
+  fetchDateGroupedDataForStoreAdmin();
+}
+
+function handleStoreAdminSearchChange() {
+  var input = document.getElementById('mgr-search-logs');
+  cachedStoreAdminData.dateAttendance.searchQuery = input ? input.value : '';
+  renderStoreAdminDateFeed();
+}
+
+function fetchDateGroupedDataForStoreAdmin() {
+  var feed = document.getElementById('mgr-logs-feed');
+  if (feed) feed.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">Loading attendance ledger...</div>';
+
+  var callerEmail = getCurrentUserEmail();
+  var params = {
+    callerEmail: callerEmail,
+    startDate: cachedStoreAdminData.dateAttendance.startDate,
+    endDate: cachedStoreAdminData.dateAttendance.endDate,
+    sortKey: cachedStoreAdminData.dateAttendance.sortKey || 'TIME',
+    sortOrder: cachedStoreAdminData.dateAttendance.sortOrder || 'DESC'
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (resp && resp.success) {
+        cachedStoreAdminData.dateAttendance.dateGroups = resp.dateGroups || [];
+        renderStoreAdminDateFeed();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Failed to load attendance: " + (err.message || err), "error");
+    })
+    .getDateGroupedAttendance(params);
+}
+
+function renderStoreAdminDateFeed() {
+  var feedEl = document.getElementById('mgr-logs-feed');
+  var groups = (cachedStoreAdminData.dateAttendance && cachedStoreAdminData.dateAttendance.dateGroups) || [];
+  var query = cachedStoreAdminData.dateAttendance.searchQuery || '';
+  renderDateGroupedAccordion(groups, feedEl, false, query);
+}
+
+function renderStoreAdminRosterList() {
   var rosterList = document.getElementById('mgr-staff-list');
-  if (rosterList) {
-    var roster = cachedStoreAdminData.roster || [];
-    if (roster.length === 0) {
-      rosterList.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">No staff assigned to this store yet.</div>';
-    } else {
-      var rHtml = '';
-      roster.forEach(function(u) {
-        var isInactive = (u.status === 'INACTIVE');
-        rHtml += 
-          '<div class="activity-card-item" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
-            '<div class="activity-row-top">' +
-              '<div class="activity-store-name"><strong>' + (u.fullName || 'Staff') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + (u.employeeCode || 'N/A') + ')</span></div>' +
-              '<span class="badge-status ' + (isInactive ? 'outside' : 'inside') + '">' + (u.status || 'ACTIVE') + '</span>' +
-            '</div>' +
-            '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.4rem;">' +
-              'Email: ' + u.email +
-            '</div>' +
-            (!isInactive ? '<div style="display: flex; justify-content: flex-end;"><button type="button" class="btn-danger btn-sm" onclick="handleStoreAdminRemoveStaff(\'' + u.email + '\', \'' + (u.fullName || u.email) + '\')">Remove from Store</button></div>' : '') +
-          '</div>';
-      });
-      rosterList.innerHTML = rHtml;
-    }
+  if (!rosterList) return;
+
+  var roster = cachedStoreAdminData.roster || [];
+  if (roster.length === 0) {
+    rosterList.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">No staff assigned to this store yet.</div>';
+    return;
   }
+
+  var rHtml = '';
+  roster.forEach(function(u) {
+    var isInactive = (u.status === 'INACTIVE');
+    rHtml += 
+      '<div class="activity-card-item" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name"><strong>' + escapeHtml(u.fullName || 'Staff') + '</strong> <span style="font-size: 0.75rem; color: var(--ink-muted);">(' + escapeHtml(u.employeeCode || 'N/A') + ')</span></div>' +
+          '<span class="badge-status ' + (isInactive ? 'outside' : 'inside') + '">' + escapeHtml(u.status || 'ACTIVE') + '</span>' +
+        '</div>' +
+        '<div style="font-size: 0.78rem; color: var(--ink-secondary); margin-bottom: 0.4rem;">' +
+          'Email: ' + escapeHtml(u.email) +
+        '</div>' +
+        (!isInactive ? '<div style="display: flex; justify-content: flex-end;"><button type="button" class="btn-danger btn-sm" onclick="handleStoreAdminRemoveStaff(\'' + u.email + '\', \'' + escapeHtml(u.fullName || u.email) + '\')">Remove from Store</button></div>' : '') +
+      '</div>';
+  });
+  rosterList.innerHTML = rHtml;
 }
 
 /**
@@ -1261,7 +1617,7 @@ function handleStoreAdminRemoveStaff(email, name) {
 }
 
 /* ==========================================================================
-   UI 3: GROUND STAFF (USER) ATTENDANCE CHECK-IN LOGIC
+   UI 3: GROUND STAFF (USER) ATTENDANCE CHECK-IN & LIVE SHIFT TRACKER
    ========================================================================== */
 
 function renderUserUI(state) {
@@ -1275,17 +1631,82 @@ function renderUserUI(state) {
     headerTitle.textContent = displayStoreName;
   }
 
-  // 2. Card Header: Formatted Mother Hub Name & Boundary
+  // 2. Card Header: Formatted Store Name
   var storeTitle = document.getElementById('store-title-label');
-  var storeSubtitle = document.getElementById('store-subtitle');
   if (storeTitle) {
-    storeTitle.textContent = displayStoreName;
-  }
-  if (storeSubtitle && store) {
-    storeSubtitle.textContent = store.radiusMeters + 'm verification boundary';
+    storeTitle.textContent = displayStoreName || 'Locating Store...';
   }
 
-  // 3. Location Status Badge & Distinct Button States
+  // 3. Live Workday Shift Tracker Widget
+  var shift = state.shiftStatus || { status: 'NOT_CHECKED_IN' };
+  var trackerCard = document.getElementById('user-shift-tracker-card');
+  var trackerDutyTitle = document.getElementById('tracker-duty-title');
+  var trackerDutyBadge = document.getElementById('tracker-duty-badge');
+  var trackerActiveBox = document.getElementById('tracker-active-box');
+  var trackerCompletedBox = document.getElementById('tracker-completed-box');
+  var trackerCheckInTime = document.getElementById('tracker-checkin-time');
+  var trackerStoreName = document.getElementById('tracker-store-name');
+  var trackerTodayDur = document.getElementById('tracker-total-today-dur');
+  var trackerShiftsCount = document.getElementById('tracker-shifts-count');
+  var trackerMiniShifts = document.getElementById('tracker-today-shifts-list');
+
+  if (shift.status === 'ON_DUTY' && shift.activeShift) {
+    if (trackerDutyTitle) trackerDutyTitle.textContent = 'On Duty';
+    if (trackerDutyBadge) {
+      trackerDutyBadge.className = 'badge-status inside';
+      trackerDutyBadge.textContent = 'On Duty';
+    }
+    if (trackerActiveBox) trackerActiveBox.classList.remove('hidden');
+    if (trackerCompletedBox) trackerCompletedBox.classList.add('hidden');
+    if (trackerCheckInTime) trackerCheckInTime.textContent = shift.activeShift.checkInTimeFormatted || shift.activeShift.checkInTimeStr || '--:--';
+    if (trackerStoreName) trackerStoreName.textContent = formatStoreName(shift.activeShift.storeName || (store ? store.storeName : 'Mother Hub'));
+
+    // Start / sync live stopwatch
+    shiftElapsedSeconds = (shift.activeShift.elapsedSeconds !== undefined && shift.activeShift.elapsedSeconds !== null)
+      ? shift.activeShift.elapsedSeconds 
+      : 0;
+    startShiftStopwatch();
+  } else if (shift.status === 'SHIFT_COMPLETED') {
+    stopShiftStopwatch();
+    if (trackerDutyTitle) trackerDutyTitle.textContent = 'Shift Completed';
+    if (trackerDutyBadge) {
+      trackerDutyBadge.className = 'badge-status outside';
+      trackerDutyBadge.textContent = 'Off Duty';
+    }
+    if (trackerActiveBox) trackerActiveBox.classList.add('hidden');
+    if (trackerCompletedBox) trackerCompletedBox.classList.remove('hidden');
+    if (trackerTodayDur) trackerTodayDur.textContent = shift.totalTodayFormatted || shift.todayTotalDurationFormatted || '0h 00m';
+    if (trackerShiftsCount) {
+      var completedCount = (shift.todayShifts && shift.todayShifts.length) || shift.todayCompletedShiftsCount || 0;
+      trackerShiftsCount.textContent = completedCount + ' Shift(s)';
+    }
+
+    // Mini chips list of today's shifts
+    if (trackerMiniShifts && shift.todayShifts && shift.todayShifts.length > 0) {
+      var chipsHtml = '';
+      shift.todayShifts.forEach(function(s, idx) {
+        var dur = s.durationFormatted || '--';
+        var inT = s.checkInTime || s.checkInTimeStr || '--';
+        var outT = s.checkOutTime || s.checkOutTimeStr || '--';
+        chipsHtml += '<span class="mini-shift-chip">Shift #' + (idx + 1) + ': ' + escapeHtml(inT) + ' - ' + escapeHtml(outT) + ' (' + escapeHtml(dur) + ')</span>';
+      });
+      trackerMiniShifts.innerHTML = chipsHtml;
+    } else if (trackerMiniShifts) {
+      trackerMiniShifts.innerHTML = '';
+    }
+  } else {
+    // NOT_CHECKED_IN
+    stopShiftStopwatch();
+    if (trackerDutyTitle) trackerDutyTitle.textContent = 'Not Checked In';
+    if (trackerDutyBadge) {
+      trackerDutyBadge.className = 'badge-status checking';
+      trackerDutyBadge.textContent = 'NOT ON DUTY';
+    }
+    if (trackerActiveBox) trackerActiveBox.classList.add('hidden');
+    if (trackerCompletedBox) trackerCompletedBox.classList.add('hidden');
+  }
+
+  // 4. Location Status Badge & Distinct Button States
   var locationBadge = document.getElementById('location-badge');
   var btnTakePhoto = document.getElementById('btn-take-photo');
   var btnMainPunch = document.getElementById('btn-main-punch');
@@ -1340,8 +1761,8 @@ function renderUserUI(state) {
     }
   }
 
-  // 4. Personal History List
-  renderPersonalHistory(state.recentLogs);
+  // 5. Personal Attendance History Ledger
+  renderPersonalHistory(state.pairedHistory || state.recentLogs);
 }
 
 /**
@@ -1510,6 +1931,16 @@ function handleSubmitPunch() {
         var actionText = (resp.checkType === 'CHECK_OUT') ? 'Checked Out' : 'Checked In';
         showToast(actionText + " successfully at " + formatStoreName(resp.storeName || store.storeName) + ".", "success");
         resetCapturedPhoto();
+
+        // Update reactive state directly from response payload
+        if (resp.shiftStatus) {
+          AppState.setShiftStatus(resp.shiftStatus);
+          setPunchType(resp.shiftStatus.status === 'ON_DUTY' ? 'CHECK_OUT' : 'CHECK_IN');
+        }
+        if (resp.pairedHistory) {
+          AppState.setPairedHistory(resp.pairedHistory);
+        }
+
         reloadSessionData(user ? user.email : '', function() {
           LiveSync.triggerImmediate();
         });
@@ -1529,42 +1960,139 @@ function handleSubmitPunch() {
     .submitAttendanceLog(payload);
 }
 
-function renderPersonalHistory(logs) {
+/**
+ * Open active shift check-in photo in modal
+ */
+function handleViewActiveCheckInPhoto() {
+  var state = AppState.getState();
+  var shift = state.shiftStatus;
+  if (shift && shift.activeShift && shift.activeShift.checkInPhotoUrl) {
+    openPhotoModal(shift.activeShift.checkInPhotoUrl, 'Active Shift Check-In Photo');
+  } else {
+    showToast("No active entry photo recorded.", "info");
+  }
+}
+
+/**
+ * Render personal attendance ledger with paired Check-In & Check-Out records
+ */
+function renderPersonalHistory(history) {
   var listEl = document.getElementById('personal-history-list');
   if (!listEl) return;
 
-  if (!logs || logs.length === 0) {
+  if (!history || history.length === 0) {
     listEl.innerHTML = 
-      '<div style="text-align: center; padding: 1.25rem; font-size: 0.85rem; color: var(--ink-muted);">' +
+      '<div style="text-align: center; padding: 1.5rem; font-size: 0.85rem; color: var(--ink-muted);">' +
         'No recent attendance recorded.' +
       '</div>';
     return;
   }
 
+  // Check if history is new paired date-grouped format
+  var isDateGrouped = history[0] && Array.isArray(history[0].shifts);
+
+  if (!isDateGrouped) {
+    // Graceful fallback for legacy flat logs
+    var html = '';
+    history.forEach(function(log) {
+      var isCheckIn = (log.checkType === 'CHECK_IN');
+      var badgeClass = isCheckIn ? 'inside' : 'checking';
+      var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
+      var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+
+      var dateObj = new Date(log.timestamp);
+      var timeFormatted = !isNaN(dateObj.getTime()) 
+        ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : log.timestamp;
+
+      var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm' : '';
+      var displayStore = formatStoreName(log.storeName || 'Mother Hub');
+
+      html += 
+        '<div class="activity-card-item ' + itemCardClass + '">' +
+          '<div class="activity-row-top">' +
+            '<div class="activity-store-name" title="' + escapeHtml(displayStore) + '">' + escapeHtml(displayStore) + '</div>' +
+            '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+          '</div>' +
+          '<div class="activity-row-bottom">' +
+            '<span class="activity-time-text">' + escapeHtml(timeFormatted) + distStr + '</span>' +
+            (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + badgeText + ' Photo\')">View Photo</button>' : '') +
+          '</div>' +
+        '</div>';
+    });
+    listEl.innerHTML = html;
+    return;
+  }
+
+  // Render paired date-grouped workday sessions
   var html = '';
-  logs.forEach(function(log) {
-    var isCheckIn = (log.checkType === 'CHECK_IN');
-    var badgeClass = isCheckIn ? 'inside' : 'checking';
-    var badgeText = isCheckIn ? 'Checked In' : 'Checked Out';
-    var itemCardClass = isCheckIn ? 'check-in' : 'check-out';
+  history.forEach(function(day) {
+    html += 
+      '<div class="day-ledger-card">' +
+        '<div class="day-ledger-header">' +
+          '<div class="day-ledger-date">' + escapeHtml(day.dateFormatted) + '</div>' +
+          '<div class="day-total-badge">' + escapeHtml(day.totalDayFormatted || '0h 00m') + '</div>' +
+        '</div>' +
+        '<div class="day-shifts-list">';
 
-    var dateObj = new Date(log.timestamp);
-    var timeFormatted = !isNaN(dateObj.getTime()) 
-      ? dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : log.timestamp;
+    if (!day.shifts || day.shifts.length === 0) {
+      html += '<div style="padding: 0.5rem 0.75rem; font-size: 0.75rem; color: var(--ink-muted);">No recorded shifts on this date.</div>';
+    } else {
+      day.shifts.forEach(function(shift, sIdx) {
+        var isCompleted = (shift.status === 'COMPLETED');
+        var isOnDuty = (shift.status === 'ON_DUTY');
+        var isIncomplete = (shift.status === 'INCOMPLETE');
 
-    var distStr = (log.distanceMeters !== undefined && log.distanceMeters !== null) ? ' · ' + Math.round(log.distanceMeters) + 'm' : '';
-    var displayStore = formatStoreName(log.storeName || 'Mother Hub');
+        var badgeClass = isCompleted ? 'inside' : (isOnDuty ? 'inside' : (isIncomplete ? 'outside' : 'checking'));
+        var badgeText = isCompleted ? 'Completed' : (isOnDuty ? 'On Duty' : (isIncomplete ? 'Missing Out' : shift.status));
+
+        var displayStore = formatStoreName(shift.storeName || 'Mother Hub');
+
+        var checkInText = shift.checkInTime || '--:--';
+        if (shift.checkInDistance !== null && shift.checkInDistance !== undefined) {
+          checkInText += ' (' + Math.round(shift.checkInDistance) + 'm)';
+        }
+
+        var checkOutText = shift.checkOutTime || '--:--';
+        if (shift.checkOutDistance !== null && shift.checkOutDistance !== undefined) {
+          checkOutText += ' (' + Math.round(shift.checkOutDistance) + 'm)';
+        }
+
+        var photoActions = '';
+        if (shift.checkInPhotoUrl && shift.checkOutPhotoUrl) {
+          photoActions = '<button type="button" class="btn-secondary btn-xs" onclick="openDualPhotoModal(\'' + shift.checkInPhotoUrl + '\', \'' + shift.checkOutPhotoUrl + '\', \'Workday Shift #' + (sIdx + 1) + '\', \'' + escapeHtml(shift.checkInTime) + '\', \'' + escapeHtml(shift.checkOutTime) + '\')">View Both Photos</button>';
+        } else if (shift.checkInPhotoUrl) {
+          photoActions = '<button type="button" class="btn-secondary btn-xs" onclick="openPhotoModal(\'' + shift.checkInPhotoUrl + '\', \'Check-In Photo\')">View Entry Photo</button>';
+        } else if (shift.checkOutPhotoUrl) {
+          photoActions = '<button type="button" class="btn-secondary btn-xs" onclick="openPhotoModal(\'' + shift.checkOutPhotoUrl + '\', \'Check-Out Photo\')">View Exit Photo</button>';
+        }
+
+        html += 
+          '<div class="paired-shift-item ' + (isIncomplete ? 'shift-incomplete' : (isOnDuty ? 'shift-onduty' : '')) + '">' +
+            '<div class="paired-shift-top">' +
+              '<span class="paired-shift-store">' + escapeHtml(displayStore) + '</span>' +
+              '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
+            '</div>' +
+            '<div class="shift-times-row">' +
+              '<div class="time-block">' +
+                '<span class="time-label">PUNCH IN</span>' +
+                '<span class="time-val">' + escapeHtml(checkInText) + '</span>' +
+              '</div>' +
+              '<div class="time-arrow">→</div>' +
+              '<div class="time-block">' +
+                '<span class="time-label">PUNCH OUT</span>' +
+                '<span class="time-val ' + (isIncomplete ? 'text-red' : '') + '">' + escapeHtml(checkOutText) + '</span>' +
+              '</div>' +
+              '<div class="time-duration-wrap">' +
+                '<span class="badge-duration">' + escapeHtml(shift.durationFormatted || '--') + '</span>' +
+              '</div>' +
+            '</div>' +
+            (photoActions ? '<div class="paired-shift-actions">' + photoActions + '</div>' : '') +
+          '</div>';
+      });
+    }
 
     html += 
-      '<div class="activity-card-item ' + itemCardClass + '">' +
-        '<div class="activity-row-top">' +
-          '<div class="activity-store-name" title="' + displayStore + '">' + displayStore + '</div>' +
-          '<span class="badge-status ' + badgeClass + '">' + badgeText + '</span>' +
-        '</div>' +
-        '<div class="activity-row-bottom">' +
-          '<span class="activity-time-text">' + timeFormatted + distStr + '</span>' +
-          (log.selfieDriveUrl ? '<button type="button" class="btn-view-photo" onclick="openPhotoModal(\'' + log.selfieDriveUrl + '\', \'' + badgeText + ' Photo\')">View Photo</button>' : '') +
         '</div>' +
       '</div>';
   });
@@ -1573,10 +2101,13 @@ function renderPersonalHistory(logs) {
 }
 
 /* ==========================================================================
-   IN-APP PHOTO RENDERING (NO "OPEN IN DRIVE", ZERO EMOJIS)
+   IN-APP VERIFICATION PHOTO MODALS (ZERO EMOJIS)
    Fetches Base64 from Google Apps Script and sets img.src = dataUri
    ========================================================================== */
 
+/**
+ * Single Photo Modal
+ */
 function openPhotoModal(imgUrlOrId, title) {
   var modal = document.getElementById('view-photo-modal');
   var img = document.getElementById('photo-modal-img');
@@ -1623,5 +2154,73 @@ function closePhotoModal() {
     img.src = '';
     img.classList.add('hidden');
   }
+}
+
+/**
+ * Dual Shift Photos Modal (Side-by-side Check-In and Check-Out)
+ */
+function openDualPhotoModal(inDriveUrl, outDriveUrl, title, inTime, outTime) {
+  var modal = document.getElementById('modal-dual-photos');
+  var titleEl = document.getElementById('dual-photo-modal-title');
+  var inTimeEl = document.getElementById('dual-in-time');
+  var outTimeEl = document.getElementById('dual-out-time');
+  var inSpinner = document.getElementById('dual-in-spinner');
+  var outSpinner = document.getElementById('dual-out-spinner');
+  var inImg = document.getElementById('dual-in-img');
+  var outImg = document.getElementById('dual-out-img');
+
+  if (titleEl) titleEl.textContent = (title || 'Workday') + ' Photos';
+  if (inTimeEl) inTimeEl.textContent = inTime || '--:--';
+  if (outTimeEl) outTimeEl.textContent = outTime || '--:--';
+
+  if (inImg) { inImg.src = ''; inImg.classList.add('hidden'); }
+  if (outImg) { outImg.src = ''; outImg.classList.add('hidden'); }
+  if (inSpinner) { inSpinner.classList.remove('hidden'); inSpinner.textContent = 'Loading photo...'; }
+  if (outSpinner) { outSpinner.classList.remove('hidden'); outSpinner.textContent = 'Loading photo...'; }
+
+  if (modal) modal.classList.remove('hidden');
+
+  if (inDriveUrl) {
+    google.script.run
+      .withSuccessHandler(function(dataUri) {
+        if (inSpinner) inSpinner.classList.add('hidden');
+        if (inImg) {
+          inImg.src = dataUri;
+          inImg.classList.remove('hidden');
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (inSpinner) inSpinner.textContent = 'Failed: ' + (err.message || err);
+      })
+      .getSelfieBase64(inDriveUrl);
+  } else {
+    if (inSpinner) inSpinner.textContent = 'No Check-In photo';
+  }
+
+  if (outDriveUrl) {
+    google.script.run
+      .withSuccessHandler(function(dataUri) {
+        if (outSpinner) outSpinner.classList.add('hidden');
+        if (outImg) {
+          outImg.src = dataUri;
+          outImg.classList.remove('hidden');
+        }
+      })
+      .withFailureHandler(function(err) {
+        if (outSpinner) outSpinner.textContent = 'Failed: ' + (err.message || err);
+      })
+      .getSelfieBase64(outDriveUrl);
+  } else {
+    if (outSpinner) outSpinner.textContent = 'No Check-Out photo';
+  }
+}
+
+function closeDualPhotoModal() {
+  var modal = document.getElementById('modal-dual-photos');
+  var inImg = document.getElementById('dual-in-img');
+  var outImg = document.getElementById('dual-out-img');
+  if (modal) modal.classList.add('hidden');
+  if (inImg) { inImg.src = ''; inImg.classList.add('hidden'); }
+  if (outImg) { outImg.src = ''; outImg.classList.add('hidden'); }
 }
 </script>
