@@ -1,0 +1,186 @@
+<!-- ==========================================================================
+     REGIONAL MANAGER DASHBOARD // MULTI-HUB CLUSTER OPERATIONS & ROSTER
+     Linear / Apple Grade Modern Enterprise Interface (Zero Emojis, Zero Slop)
+     ========================================================================== -->
+
+<div id="view-regional-manager-dashboard" class="hidden">
+  
+  <!-- 1. Regional Cluster Banner & Aggregate KPIs -->
+  <div class="store-banner-card">
+    <div class="store-banner-top">
+      <div style="min-width: 0; flex: 1;">
+        <div id="rm-banner-title" class="store-banner-title">Regional Operations</div>
+        <div id="rm-banner-sub" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem;">
+          Managing <span id="rm-banner-hubs-count">0</span> Mother Hubs
+        </div>
+      </div>
+    </div>
+
+    <div class="store-kpi-row" style="grid-template-columns: repeat(4, 1fr);">
+      <div class="store-kpi-tile">
+        <div class="store-kpi-label">Managed Hubs</div>
+        <div id="rm-kpi-hubs" class="store-kpi-value">0</div>
+      </div>
+      <div class="store-kpi-tile">
+        <div class="store-kpi-label">On Duty Now</div>
+        <div id="rm-kpi-onduty" class="store-kpi-value text-green">0</div>
+      </div>
+      <div class="store-kpi-tile">
+        <div class="store-kpi-label">Checked In Today</div>
+        <div id="rm-kpi-checkedin" class="store-kpi-value text-orange">0</div>
+      </div>
+      <div class="store-kpi-tile">
+        <div class="store-kpi-label">Total Personnel</div>
+        <div id="rm-kpi-totalstaff" class="store-kpi-value">0</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Segmented Navigation Bar -->
+  <div class="admin-tab-bar">
+    <button type="button" id="rm-tab-btn-logs" class="admin-tab-btn active" onclick="switchRegionalManagerTab('logs')">
+      Cluster Attendance
+    </button>
+    <button type="button" id="rm-tab-btn-roster" class="admin-tab-btn" onclick="switchRegionalManagerTab('roster')">
+      Roster Provisioning
+    </button>
+  </div>
+
+  <!-- 3. Multi-Hub Selector Bar (Applies to both Attendance & Roster) -->
+  <div class="ui-card" style="padding: 0.65rem 0.85rem; margin-bottom: 0.85rem;">
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap;">
+      <span class="ui-label-xs" style="margin: 0;">Filter Mother Hub:</span>
+      <div id="rm-hub-pills" class="preset-pills-row" style="padding-bottom: 0;">
+        <button type="button" class="preset-pill active" onclick="handleRMSelectHub('ALL')">All My Hubs</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       TAB 1: CLUSTER ATTENDANCE (DATE-WISE VIEW & MULTI-CRITERIA SORTING)
+       ======================================================================== -->
+  <div id="rm-tab-logs" class="rm-tab-content">
+    <div class="ui-card">
+      <div class="card-header-row" style="margin-bottom: 0.85rem; align-items: center;">
+        <div class="card-heading">Cluster Attendance Ledger</div>
+      </div>
+
+      <!-- Date Presets & Filter Toolbar -->
+      <div class="date-filter-toolbar">
+        <div class="preset-pills-row">
+          <button type="button" class="preset-pill active" onclick="handleRMDatePreset('TODAY')">Today</button>
+          <button type="button" class="preset-pill" onclick="handleRMDatePreset('YESTERDAY')">Yesterday</button>
+          <button type="button" class="preset-pill" onclick="handleRMDatePreset('WEEK')">This Week</button>
+          <button type="button" class="preset-pill" onclick="handleRMDatePreset('MONTH')">This Month</button>
+          <button type="button" class="preset-pill" onclick="handleRMDatePreset('ALL')">All Time</button>
+        </div>
+
+        <div class="date-controls-row">
+          <div class="date-input-group">
+            <label class="ui-label-xs" for="rm-filter-start-date">From</label>
+            <input type="date" id="rm-filter-start-date" class="ui-date-input" onchange="handleRMDateRangeChange()">
+          </div>
+          <div class="date-input-group">
+            <label class="ui-label-xs" for="rm-filter-end-date">To</label>
+            <input type="date" id="rm-filter-end-date" class="ui-date-input" onchange="handleRMDateRangeChange()">
+          </div>
+          <div class="sort-select-group">
+            <label class="ui-label-xs" for="rm-sort-select">Sort</label>
+            <select id="rm-sort-select" class="ui-select ui-select-sm" onchange="handleRMSortChange()">
+              <option value="TIME_DESC">Check-In Time (Latest First)</option>
+              <option value="TIME_ASC">Check-In Time (Earliest First)</option>
+              <option value="NAME_ASC">Staff Name (A to Z)</option>
+              <option value="NAME_DESC">Staff Name (Z to A)</option>
+              <option value="DURATION_DESC">Hours Worked (Longest First)</option>
+            </select>
+          </div>
+          <div class="search-input-group" style="flex: 1; min-width: 160px;">
+            <label class="ui-label-xs" for="rm-search-logs">Search</label>
+            <input type="text" id="rm-search-logs" class="ui-input ui-input-sm" placeholder="Search staff name or code..." oninput="handleRMSearchChange()">
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Attendance Date-Grouped Accordion Feed -->
+      <div id="rm-logs-feed" class="card-list" style="margin-top: 1rem;">
+        <div style="text-align: center; padding: 2.5rem; font-size: 0.82rem; color: var(--text-muted);">
+          Loading cluster attendance records...
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       TAB 2: ROSTER PROVISIONING (REGIONAL MANAGER EXCLUSIVE AUTHORITY)
+       ======================================================================== -->
+  <div id="rm-tab-roster" class="rm-tab-content hidden">
+    <div class="desktop-split-layout">
+      
+      <!-- Left Column: Add / Upload Roster Card -->
+      <div class="ui-card">
+        <div class="card-header-row" style="align-items: center;">
+          <div class="card-heading">Add Personnel</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="openRMBatchUploadModal()">
+            Batch Upload CSV
+          </button>
+        </div>
+
+        <form id="form-rm-add-staff" onsubmit="handleRMAddSingleStaff(event)">
+          <div style="margin-bottom: 0.75rem;">
+            <label class="ui-label" for="rm-add-target-hub">Target Mother Hub</label>
+            <select id="rm-add-target-hub" class="ui-select" required>
+              <option value="">Select Mother Hub...</option>
+            </select>
+          </div>
+
+          <div style="margin-bottom: 0.75rem;">
+            <label class="ui-label" for="rm-add-staff-email">Corporate Google Email</label>
+            <input type="email" id="rm-add-staff-email" class="ui-input" placeholder="colleague@company.com" required>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+            <div>
+              <label class="ui-label" for="rm-add-staff-name">Full Name</label>
+              <input type="text" id="rm-add-staff-name" class="ui-input" placeholder="e.g. Ramesh Singh" required>
+            </div>
+            <div>
+              <label class="ui-label" for="rm-add-staff-code">Employee ID</label>
+              <input type="text" id="rm-add-staff-code" class="ui-input" placeholder="Optional">
+            </div>
+          </div>
+
+          <div style="margin-bottom: 0.85rem;">
+            <label class="ui-label" for="rm-add-staff-role">Personnel Role</label>
+            <select id="rm-add-staff-role" class="ui-select">
+              <option value="STAFF">Ground Employee</option>
+              <option value="HUB_MANAGER">Hub Manager (Manager 1 / 2)</option>
+            </select>
+          </div>
+
+          <button type="submit" id="btn-rm-add-staff-submit" class="btn-primary">
+            Add to Hub Roster
+          </button>
+        </form>
+      </div>
+
+      <!-- Right Column: Hub Roster Directory -->
+      <div class="ui-card">
+        <div class="card-header-row" style="align-items: center;">
+          <div class="card-heading">Hub Personnel Directory</div>
+        </div>
+
+        <div style="margin-bottom: 0.75rem;">
+          <input type="text" id="rm-roster-search" class="ui-input ui-input-sm" placeholder="Filter roster by name, email or code..." oninput="handleRMRosterSearchChange()">
+        </div>
+
+        <div id="rm-roster-list" class="card-list">
+          <div style="text-align: center; padding: 2rem; font-size: 0.82rem; color: var(--text-muted);">
+            Loading hub personnel...
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>

@@ -202,10 +202,10 @@ function getInitialSessionData(clientEmailHint) {
 
     const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
 
-    // 3. Strict 3-Role Data Scoping: SUPER_ADMIN | STORE_ADMIN | USER
+    // 3. Strict 3-Role Data Scoping: SUPER_ADMIN | REGIONAL_MANAGER | USER
     if (user.role === "SUPER_ADMIN") {
       const kpis = Database.getGlobalKpis();
-      const stores = Database.getAllStores(true); // All stores with multi-managers
+      const stores = Database.getAllStores(true); // All stores with multi-managers & RMs
       const dateAttendance = Database.getDateGroupedAttendanceLogs("SUPER_ADMIN", "", "", "ALL", todayStr, todayStr, "TIME", "DESC", 100);
       const allUsers = Database.getAllUsers();
 
@@ -219,33 +219,25 @@ function getInitialSessionData(clientEmailHint) {
         allUsers: allUsers,
         serverTime: serverTime
       };
-    } else if (user.role === "STORE_ADMIN") {
-      let store = Database.getStoreById(user.assignedStoreId);
-      if (!store) {
-        const activeStores = Database.getActiveStores();
-        store = activeStores[0] || null;
-        if (store) {
-          user = Database.updateUser(email, { assignedStoreId: store.storeId });
-        }
-      }
-
-      const storeId = store ? store.storeId : "";
-      const kpis = Database.getStoreKpis(storeId);
-      const dateAttendance = Database.getDateGroupedAttendanceLogs("STORE_ADMIN", storeId, user.email, storeId, todayStr, todayStr, "TIME", "DESC", 100);
-      const roster = Database.getScopedUsers("STORE_ADMIN", storeId, user.email);
+    } else if (user.role === "REGIONAL_MANAGER") {
+      const assignedStores = Database.getStoresForRegionalManager(email);
+      const storeIds = assignedStores.map(s => s.storeId);
+      const kpis = Database.getRegionalAggregatedKpis(storeIds);
+      const dateAttendance = Database.getDateGroupedAttendanceLogs("REGIONAL_MANAGER", storeIds, email, "ALL", todayStr, todayStr, "TIME", "DESC", 200);
+      const roster = Database.getScopedUsers("REGIONAL_MANAGER", storeIds, email);
 
       return {
         success: true,
-        role: "STORE_ADMIN",
+        role: "REGIONAL_MANAGER",
         user: user,
-        store: store,
+        assignedStores: assignedStores,
         kpis: kpis,
         dateAttendance: dateAttendance,
         roster: roster,
         serverTime: serverTime
       };
     } else {
-      // Ground Staff (USER) - Live Shift Tracker & Paired Work History
+      // Ground Staff & Hub Managers (USER) - Live Shift Tracker & Paired Work History
       const allStores = Database.getActiveStores();
       const shiftStatus = Database.getUserShiftStatus(email);
       const pairedHistory = Database.getPairedUserHistory(email, 15);
@@ -344,6 +336,197 @@ function getStoreAdminDashboardData(callerEmail, startDate, endDate, sortKey, so
     roster: roster,
     serverTime: new Date().toISOString()
   };
+}
+
+/**
+ * Regional Manager: Refreshes Dashboard Data
+ */
+function getRegionalManagerDashboardData(payloadOrEmail, startDate, endDate, sortKey, sortOrder, filterStoreId) {
+  let callerEmail = payloadOrEmail;
+  let sDate = startDate;
+  let eDate = endDate;
+  let sKey = sortKey;
+  let sOrder = sortOrder;
+  let fStore = filterStoreId;
+
+  if (payloadOrEmail && typeof payloadOrEmail === 'object') {
+    callerEmail = payloadOrEmail.callerEmail;
+    sDate = payloadOrEmail.startDate;
+    eDate = payloadOrEmail.endDate;
+    sKey = payloadOrEmail.sortKey;
+    sOrder = payloadOrEmail.sortOrder;
+    fStore = payloadOrEmail.filterStoreId;
+  }
+
+  const sessionEmail = getAuthenticatedEmail(callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || (caller.role !== "REGIONAL_MANAGER" && caller.role !== "SUPER_ADMIN")) {
+    throw new Error("Regional Manager access required.");
+  }
+
+  const assignedStores = (caller.role === "SUPER_ADMIN") 
+    ? Database.getActiveStores() 
+    : Database.getStoresForRegionalManager(sessionEmail);
+  const storeIds = assignedStores.map(s => s.storeId);
+
+  const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+  const actualStart = sDate || todayStr;
+  const actualEnd = eDate || todayStr;
+  const storeFilter = fStore || "ALL";
+
+  const kpis = Database.getRegionalAggregatedKpis(storeIds);
+  const dateAttendance = Database.getDateGroupedAttendanceLogs("REGIONAL_MANAGER", storeIds, caller.email, storeFilter, actualStart, actualEnd, sKey || "TIME", sOrder || "DESC", 200);
+  const roster = Database.getScopedUsers("REGIONAL_MANAGER", storeIds, caller.email);
+
+  return {
+    success: true,
+    assignedStores: assignedStores,
+    kpis: kpis,
+    dateAttendance: dateAttendance,
+    roster: roster,
+    serverTime: new Date().toISOString()
+  };
+}
+
+/**
+ * Regional Manager: Batch Roster Upload (Exclusive Roster Authority)
+ */
+function uploadHubRoster(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || (caller.role !== "REGIONAL_MANAGER" && caller.role !== "SUPER_ADMIN")) {
+    throw new Error("Access Denied: Only assigned Regional Managers can upload the roster.");
+  }
+
+  const store = Database.getStoreById(payload.storeId);
+  if (!store) throw new Error("Target Mother Hub not found.");
+
+  // Strict RBAC: Caller must be in store.regionalManagerEmails or SUPER_ADMIN
+  if (caller.role !== "SUPER_ADMIN") {
+    const isAssigned = (store.regionalManagerEmails && store.regionalManagerEmails.includes(sessionEmail)) || (store.primaryAdminEmail === sessionEmail);
+    if (!isAssigned) {
+      throw new Error("Access Denied: You are not an assigned Regional Manager for " + store.storeName);
+    }
+  }
+
+  const result = Database.batchUpsertHubRoster(store.storeId, payload.rosterRows, sessionEmail);
+  const updatedRoster = Database.getScopedUsers("REGIONAL_MANAGER", [store.storeId], sessionEmail);
+  
+  return {
+    success: true,
+    count: result.count,
+    storeId: store.storeId,
+    storeName: store.storeName,
+    roster: updatedRoster
+  };
+}
+
+/**
+ * Regional Manager: Add Single Staff / Manager to Mother Hub
+ */
+function addSingleStaffToHub(payload) {
+  return uploadHubRoster({
+    storeId: payload.storeId,
+    rosterRows: [{
+      email: payload.email,
+      fullName: payload.fullName,
+      employeeCode: payload.employeeCode,
+      designation: payload.designation || "STAFF"
+    }],
+    callerEmail: payload.callerEmail
+  });
+}
+
+/**
+ * Regional Manager: Remove Staff / Manager from Mother Hub
+ */
+function removeStaffFromHub(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || (caller.role !== "REGIONAL_MANAGER" && caller.role !== "SUPER_ADMIN")) {
+    throw new Error("Unauthorized.");
+  }
+
+  const store = Database.getStoreById(payload.storeId);
+  if (!store) throw new Error("Store not found.");
+
+  if (caller.role !== "SUPER_ADMIN") {
+    const isAssigned = (store.regionalManagerEmails && store.regionalManagerEmails.includes(sessionEmail)) || (store.primaryAdminEmail === sessionEmail);
+    if (!isAssigned) {
+      throw new Error("Access Denied: You are not assigned to manage " + store.storeName);
+    }
+  }
+
+  const targetUser = Database.findUserByEmail(payload.email);
+  if (targetUser && targetUser.role === "SUPER_ADMIN") {
+    throw new Error("Access Denied: Super Admin is the top-level authority and cannot be removed from any Mother Hub.");
+  }
+
+  Database.removeStaffFromHub(store.storeId, payload.email, sessionEmail);
+  const updatedRoster = Database.getScopedUsers("REGIONAL_MANAGER", [store.storeId], sessionEmail);
+
+  return {
+    success: true,
+    email: payload.email,
+    roster: updatedRoster
+  };
+}
+
+/**
+ * Super Admin: Assign Regional Manager to Mother Hub (Many-to-Many)
+ */
+function assignStoreRegionalManager(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || caller.role !== "SUPER_ADMIN") {
+    throw new Error("Super Admin access required.");
+  }
+
+  const updatedStore = Database.addStoreRegionalManager(
+    payload.storeId,
+    payload.rmEmail,
+    payload.rmName,
+    payload.rmCode,
+    sessionEmail
+  );
+
+  return {
+    success: true,
+    store: updatedStore,
+    stores: Database.getAllStores(true),
+    allUsers: Database.getAllUsers()
+  };
+}
+
+/**
+ * Super Admin: Remove Regional Manager from Mother Hub
+ */
+function removeStoreRegionalManager(payload) {
+  const sessionEmail = getAuthenticatedEmail(payload.callerEmail);
+  const caller = Database.findUserByEmail(sessionEmail);
+  if (!caller || caller.role !== "SUPER_ADMIN") {
+    throw new Error("Super Admin access required.");
+  }
+
+  const updatedStore = Database.removeStoreRegionalManager(
+    payload.storeId,
+    payload.rmEmail,
+    sessionEmail
+  );
+
+  return {
+    success: true,
+    store: updatedStore,
+    stores: Database.getAllStores(true),
+    allUsers: Database.getAllUsers()
+  };
+}
+
+/**
+ * Super Admin: Get Regional Managers for a Mother Hub
+ */
+function getStoreRegionalManagers(storeId) {
+  return Database.getStoreRegionalManagers(storeId);
 }
 
 /**

@@ -43,6 +43,23 @@ var cachedStoreAdminData = {
   roster: []
 };
 
+var cachedRegionalManagerData = {
+  assignedStores: [],
+  selectedStoreId: 'ALL',
+  kpis: null,
+  dateAttendance: {
+    startDate: '',
+    endDate: '',
+    sortKey: 'TIME',
+    sortOrder: 'DESC',
+    dateGroups: [],
+    filterStoreId: 'ALL',
+    searchQuery: ''
+  },
+  roster: [],
+  rosterSearchQuery: ''
+};
+
 /**
  * XSS-Safe HTML Escaper
  */
@@ -219,6 +236,40 @@ var LiveSync = (function() {
           if (onComplete) onComplete();
         })
         .getSuperAdminDashboardData(callerEmail);
+
+    } else if (role === 'REGIONAL_MANAGER') {
+      var filterStoreId = cachedRegionalManagerData.selectedStoreId || 'ALL';
+      var startDate = cachedRegionalManagerData.dateAttendance.startDate || '';
+      var endDate = cachedRegionalManagerData.dateAttendance.endDate || '';
+      var sortKey = cachedRegionalManagerData.dateAttendance.sortKey || 'TIME';
+      var sortOrder = cachedRegionalManagerData.dateAttendance.sortOrder || 'DESC';
+
+      google.script.run
+        .withSuccessHandler(function(resp) {
+          isSyncInFlight = false;
+          if (resp && resp.success) {
+            cachedRegionalManagerData.assignedStores = resp.assignedStores || cachedRegionalManagerData.assignedStores;
+            cachedRegionalManagerData.kpis = resp.kpis;
+            if (resp.dateAttendance && resp.dateAttendance.dateGroups) {
+              cachedRegionalManagerData.dateAttendance.dateGroups = resp.dateAttendance.dateGroups;
+            }
+            cachedRegionalManagerData.roster = resp.roster || cachedRegionalManagerData.roster;
+            renderRegionalManagerUI();
+          }
+          if (onComplete) onComplete();
+        })
+        .withFailureHandler(function(err) {
+          isSyncInFlight = false;
+          if (onComplete) onComplete();
+        })
+        .getRegionalManagerDashboardData({
+          callerEmail: callerEmail,
+          startDate: startDate,
+          endDate: endDate,
+          sortKey: sortKey,
+          sortOrder: sortOrder,
+          filterStoreId: filterStoreId
+        });
 
     } else if (role === 'STORE_ADMIN') {
       google.script.run
@@ -397,12 +448,14 @@ function hideAllDashboards() {
   var viewUser = document.getElementById('view-user-dashboard');
   var viewStoreAdmin = document.getElementById('view-store-admin-dashboard');
   var viewSuperAdmin = document.getElementById('view-super-admin-dashboard');
+  var viewRegionalManager = document.getElementById('view-regional-manager-dashboard');
   var viewDenied = document.getElementById('view-access-denied');
 
   if (viewAuth) viewAuth.classList.add('hidden');
   if (viewUser) viewUser.classList.add('hidden');
   if (viewStoreAdmin) viewStoreAdmin.classList.add('hidden');
   if (viewSuperAdmin) viewSuperAdmin.classList.add('hidden');
+  if (viewRegionalManager) viewRegionalManager.classList.add('hidden');
   if (viewDenied) viewDenied.classList.add('hidden');
 }
 
@@ -598,6 +651,7 @@ function handleInitialData(resp) {
   var viewUser = document.getElementById('view-user-dashboard');
   var viewStoreAdmin = document.getElementById('view-store-admin-dashboard');
   var viewSuperAdmin = document.getElementById('view-super-admin-dashboard');
+  var viewRegionalManager = document.getElementById('view-regional-manager-dashboard');
   var headerTitle = document.getElementById('header-store-name');
 
   // Strict 3-Role View Separation & Desktop Mode Trigger:
@@ -612,6 +666,18 @@ function handleInitialData(resp) {
     cachedSuperAdminData.allUsers = resp.allUsers || [];
 
     renderSuperAdminUI();
+  } else if (role === 'REGIONAL_MANAGER') {
+    if (appContainer) appContainer.classList.add('admin-mode');
+    if (viewRegionalManager) viewRegionalManager.classList.remove('hidden');
+    if (headerTitle) headerTitle.textContent = "Regional Operations";
+
+    cachedRegionalManagerData.assignedStores = resp.assignedStores || [];
+    cachedRegionalManagerData.kpis = resp.kpis;
+    cachedRegionalManagerData.dateAttendance = resp.dateAttendance || { dateGroups: [] };
+    cachedRegionalManagerData.roster = resp.roster || [];
+    cachedRegionalManagerData.selectedStoreId = 'ALL';
+
+    renderRegionalManagerUI();
   } else if (role === 'STORE_ADMIN') {
     if (appContainer) appContainer.classList.add('admin-mode');
     if (viewStoreAdmin) viewStoreAdmin.classList.remove('hidden');
@@ -783,7 +849,8 @@ function renderDateGroupedAccordion(dateGroups, containerEl, isSuperAdmin, searc
 
     var k = dayGroup.kpis;
     var todayPill = dayGroup.isToday ? '<span class="day-today-pill">TODAY</span>' : '';
-    var accordionId = 'date-acc-' + (isSuperAdmin ? 'sa-' : 'mgr-') + dayGroup.dateStr;
+    var prefix = (typeof isSuperAdmin === 'string') ? (isSuperAdmin + '-') : (isSuperAdmin ? 'sa-' : 'mgr-');
+    var accordionId = 'date-acc-' + prefix + dayGroup.dateStr;
 
     html += 
       '<div class="date-accordion-card">' +
@@ -953,7 +1020,7 @@ function handleSuperAdminSearchChange() {
 
 function fetchDateGroupedDataForSuperAdmin() {
   var feed = document.getElementById('sa-logs-feed');
-  if (feed) feed.innerHTML = '<div style="text-align: center; padding: 2.5rem; font-size: 0.85rem; color: var(--ink-muted);">Loading global attendance ledger...</div>';
+  if (feed) feed.innerHTML = '<div class="ui-loading-box"><span class="ui-spinner"></span><span>Loading global attendance ledger...</span></div>';
 
   var callerEmail = getCurrentUserEmail();
   var params = {
@@ -1019,6 +1086,19 @@ function renderSuperAdminStoresList() {
       });
     }
 
+    var rms = s.regionalManagerEmails || [];
+    var rmsHtml = '';
+    if (rms.length === 0) {
+      rmsHtml = '<span style="font-size: 0.75rem; color: var(--ink-muted);">No regional managers assigned</span>';
+    } else {
+      rms.forEach(function(rmEmail) {
+        rmsHtml += 
+          '<span class="manager-pill co-mgr" style="border-left: 2px solid #2563EB;">' +
+            escapeHtml(rmEmail) +
+          '</span> ';
+      });
+    }
+
     html += 
       '<div class="activity-card-item store-card-box" style="background: ' + (isInactive ? '#F4F4F5' : '#FFFFFF') + ';">' +
         '<div class="activity-row-top">' +
@@ -1029,11 +1109,16 @@ function renderSuperAdminStoresList() {
           'Coords: ' + s.latitude.toFixed(4) + ', ' + s.longitude.toFixed(4) + ' · Radius: ' + s.radiusMeters + 'm' +
         '</div>' +
         '<div class="store-managers-section">' +
-          '<div class="meta-label">ASSIGNED MANAGERS (' + managers.length + ')</div>' +
+          '<div class="meta-label">REGIONAL MANAGERS (' + rms.length + ')</div>' +
+          '<div class="store-managers-flow">' + rmsHtml + '</div>' +
+        '</div>' +
+        '<div class="store-managers-section" style="margin-top: 0.5rem;">' +
+          '<div class="meta-label">HUB PERSONNEL MANAGERS (' + managers.length + ')</div>' +
           '<div class="store-managers-flow">' + mgrsHtml + '</div>' +
         '</div>' +
-        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end; margin-top: 0.75rem;">' +
-          '<button type="button" class="btn-primary btn-sm" onclick="openManageManagersModal(\'' + s.storeId + '\')">Manage Managers</button>' +
+        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end; margin-top: 0.75rem; flex-wrap: wrap;">' +
+          '<button type="button" class="btn-primary btn-sm" onclick="openManageRMsModal(\'' + s.storeId + '\')">Manage Regional Managers</button>' +
+          '<button type="button" class="btn-secondary btn-sm" onclick="openManageManagersModal(\'' + s.storeId + '\')">Hub Managers</button>' +
           (!isInactive ? '<button type="button" class="btn-danger btn-sm" onclick="handleDeactivateStore(\'' + s.storeId + '\', \'' + escapeHtml(formatStoreName(s.storeName)) + '\')">Deactivate</button>' : '') +
         '</div>' +
       '</div>';
@@ -1208,6 +1293,149 @@ function closeChangeAdminModal() {
 }
 
 /**
+ * Super Admin: Manage Regional Managers for a Mother Hub
+ */
+function openManageRMsModal(storeId) {
+  var modal = document.getElementById('modal-manage-rms');
+  var titleEl = document.getElementById('manage-rms-store-title');
+  var storeIdInput = document.getElementById('manage-rms-store-id');
+
+  var store = (cachedSuperAdminData.stores || []).find(function(s) { return s.storeId === storeId; });
+  if (!store) return;
+
+  if (titleEl) titleEl.textContent = "Manage Regional Managers · " + formatStoreName(store.storeName) + " (" + store.storeId + ")";
+  if (storeIdInput) storeIdInput.value = store.storeId;
+
+  var emailInput = document.getElementById('assign-rm-email');
+  var nameInput = document.getElementById('assign-rm-name');
+  var codeInput = document.getElementById('assign-rm-code');
+
+  if (emailInput) emailInput.value = '';
+  if (nameInput) nameInput.value = '';
+  if (codeInput) codeInput.value = '';
+
+  renderManageRMsModalList(store);
+
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeManageRMsModal() {
+  var modal = document.getElementById('modal-manage-rms');
+  if (modal) modal.classList.add('hidden');
+}
+
+function renderManageRMsModalList(store) {
+  var listEl = document.getElementById('manage-rms-list');
+  if (!listEl) return;
+
+  var rms = store.regionalManagerEmails || [];
+  if (rms.length === 0) {
+    listEl.innerHTML = '<div style="font-size: 0.8rem; color: var(--ink-muted); padding: 0.5rem 0;">No regional managers currently assigned to this Mother Hub.</div>';
+    return;
+  }
+
+  var html = '';
+  rms.forEach(function(rmEmail) {
+    html += 
+      '<div class="manager-item-row">' +
+        '<div class="mgr-item-left">' +
+          '<div class="mgr-item-name"><strong>' + escapeHtml(rmEmail) + '</strong> ' +
+            '<span class="badge-role-super" style="background:#2563EB;color:#FFF;font-size:0.65rem;padding:0.15rem 0.4rem;border-radius:4px;">REGIONAL MANAGER</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="mgr-item-actions">' +
+          '<button type="button" class="btn-danger btn-xs" onclick="handleSuperAdminRemoveRM(\'' + store.storeId + '\', \'' + rmEmail + '\')">Remove</button>' +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+function handleSuperAdminAssignRM(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  var storeId = document.getElementById('manage-rms-store-id').value;
+  var email = document.getElementById('assign-rm-email').value;
+  var name = document.getElementById('assign-rm-name').value;
+  var code = document.getElementById('assign-rm-code').value;
+  var btn = document.getElementById('btn-save-assign-rm');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (!email || email.indexOf('@') === -1) {
+    showToast("Please enter a valid regional manager email.", "error");
+    return;
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Assigning...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Assign Regional Manager';
+      }
+      showToast("Regional Manager assigned successfully.", "success");
+      var eIn = document.getElementById('assign-rm-email');
+      var nIn = document.getElementById('assign-rm-name');
+      var cIn = document.getElementById('assign-rm-code');
+      if (eIn) eIn.value = '';
+      if (nIn) nIn.value = '';
+      if (cIn) cIn.value = '';
+
+      if (resp && resp.success) {
+        cachedSuperAdminData.stores = resp.stores || [];
+        var updatedStore = cachedSuperAdminData.stores.find(function(s) { return s.storeId === storeId; });
+        if (updatedStore) renderManageRMsModalList(updatedStore);
+        renderSuperAdminStoresList();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Assign Regional Manager';
+      }
+      showToast("Failed to assign Regional Manager: " + (err.message || err), "error");
+    })
+    .assignStoreRegionalManager({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      rmEmail: email,
+      rmName: name,
+      rmCode: code
+    });
+}
+
+function handleSuperAdminRemoveRM(storeId, rmEmail) {
+  if (!confirm("Are you sure you want to remove Regional Manager " + rmEmail + " from this Mother Hub?")) return;
+  var callerEmail = getCurrentUserEmail();
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      showToast("Regional Manager removed from Mother Hub.", "success");
+      if (resp && resp.success) {
+        cachedSuperAdminData.stores = resp.stores || [];
+        var updatedStore = cachedSuperAdminData.stores.find(function(s) { return s.storeId === storeId; });
+        if (updatedStore) renderManageRMsModalList(updatedStore);
+        renderSuperAdminStoresList();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Error removing Regional Manager: " + (err.message || err), "error");
+    })
+    .removeStoreRegionalManager({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      rmEmail: rmEmail
+    });
+}
+
+/**
  * Super Admin: All Users Filter & Actions
  */
 function applySuperAdminUsersFilter() {
@@ -1235,6 +1463,7 @@ function applySuperAdminUsersFilter() {
   var html = '';
   filtered.forEach(function(u) {
     var roleBadge = (u.role === 'SUPER_ADMIN') ? '<span class="badge-role badge-role-super">SUPER ADMIN</span>'
+      : (u.role === 'REGIONAL_MANAGER') ? '<span class="badge-role badge-role-super" style="background:#2563EB;color:#FFF;">REGIONAL MGR</span>'
       : (u.role === 'STORE_ADMIN') ? '<span class="badge-role badge-role-mgr">STORE ADMIN</span>'
       : '<span class="badge-role badge-role-user">STAFF</span>';
 
@@ -1478,7 +1707,7 @@ function handleStoreAdminSearchChange() {
 
 function fetchDateGroupedDataForStoreAdmin() {
   var feed = document.getElementById('mgr-logs-feed');
-  if (feed) feed.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.85rem; color: var(--ink-muted);">Loading attendance ledger...</div>';
+  if (feed) feed.innerHTML = '<div class="ui-loading-box"><span class="ui-spinner"></span><span>Loading store attendance ledger...</span></div>';
 
   var callerEmail = getCurrentUserEmail();
   var params = {
@@ -2098,6 +2327,481 @@ function renderPersonalHistory(history) {
   });
 
   listEl.innerHTML = html;
+}
+
+/* ==========================================================================
+   UI 4: REGIONAL MANAGER DASHBOARD LOGIC & RENDERING (MULTI-HUB CLUSTER)
+   ========================================================================== */
+
+function switchRegionalManagerTab(tab) {
+  var logsTabBtn = document.getElementById('rm-tab-btn-logs');
+  var rosterTabBtn = document.getElementById('rm-tab-btn-roster');
+  var logsTab = document.getElementById('rm-tab-logs');
+  var rosterTab = document.getElementById('rm-tab-roster');
+
+  if (tab === 'roster') {
+    if (logsTabBtn) logsTabBtn.classList.remove('active');
+    if (rosterTabBtn) rosterTabBtn.classList.add('active');
+    if (logsTab) logsTab.classList.add('hidden');
+    if (rosterTab) rosterTab.classList.remove('hidden');
+  } else {
+    if (logsTabBtn) logsTabBtn.classList.add('active');
+    if (rosterTabBtn) rosterTabBtn.classList.remove('active');
+    if (logsTab) logsTab.classList.remove('hidden');
+    if (rosterTab) rosterTab.classList.add('hidden');
+  }
+}
+
+function renderRegionalManagerUI() {
+  var data = cachedRegionalManagerData;
+  var stores = data.assignedStores || [];
+
+  // Update Hubs Count Banner & KPIs
+  var hubsCountEl = document.getElementById('rm-banner-hubs-count');
+  if (hubsCountEl) hubsCountEl.textContent = stores.length;
+
+  var kpis = data.kpis || { totalStaff: 0, checkedInToday: 0, activeOnDuty: 0 };
+  var kpiHubs = document.getElementById('rm-kpi-hubs');
+  var kpiOnDuty = document.getElementById('rm-kpi-onduty');
+  var kpiCheckedIn = document.getElementById('rm-kpi-checkedin');
+  var kpiTotalStaff = document.getElementById('rm-kpi-totalstaff');
+
+  if (kpiHubs) kpiHubs.textContent = stores.length;
+  if (kpiOnDuty) kpiOnDuty.textContent = kpis.activeOnDuty || 0;
+  if (kpiCheckedIn) kpiCheckedIn.textContent = kpis.checkedInToday || 0;
+  if (kpiTotalStaff) kpiTotalStaff.textContent = kpis.totalStaff || (data.roster ? data.roster.length : 0);
+
+  // Render Hub Selector Pills & dropdowns
+  renderRMHubSelector();
+
+  // Set default date range if not set
+  var startInput = document.getElementById('rm-filter-start-date');
+  var endInput = document.getElementById('rm-filter-end-date');
+  if (startInput && !startInput.value && !data.dateAttendance.startDate) {
+    var todayRange = getDatePresetRange('TODAY');
+    data.dateAttendance.startDate = todayRange.start;
+    data.dateAttendance.endDate = todayRange.end;
+    startInput.value = todayRange.start;
+    if (endInput) endInput.value = todayRange.end;
+  }
+
+  // Render Feeds
+  renderRMDateFeed();
+  renderRMRosterTable();
+}
+
+function renderRMHubSelector() {
+  var pillsContainer = document.getElementById('rm-hub-pills');
+  var targetSelect = document.getElementById('rm-add-target-hub');
+  var batchTargetSelect = document.getElementById('rm-batch-target-hub');
+  var stores = cachedRegionalManagerData.assignedStores || [];
+  var currentSelected = cachedRegionalManagerData.selectedStoreId || 'ALL';
+
+  if (pillsContainer) {
+    var pillsHtml = '<button type="button" class="preset-pill ' + (currentSelected === 'ALL' ? 'active' : '') + '" onclick="handleRMSelectHub(\'ALL\')">All My Hubs (' + stores.length + ')</button>';
+    stores.forEach(function(s) {
+      var isActive = (currentSelected === s.storeId);
+      pillsHtml += '<button type="button" class="preset-pill ' + (isActive ? 'active' : '') + '" onclick="handleRMSelectHub(\'' + s.storeId + '\')">' + escapeHtml(formatStoreName(s.storeName)) + '</button>';
+    });
+    pillsContainer.innerHTML = pillsHtml;
+  }
+
+  // Populate Dropdown for Single Add and Batch Add
+  var optionsHtml = '<option value="">Select Mother Hub...</option>';
+  stores.forEach(function(s) {
+    optionsHtml += '<option value="' + s.storeId + '">' + escapeHtml(formatStoreName(s.storeName)) + ' (' + escapeHtml(s.storeId) + ')</option>';
+  });
+
+  if (targetSelect) {
+    var prevVal = targetSelect.value;
+    targetSelect.innerHTML = optionsHtml;
+    if (prevVal) targetSelect.value = prevVal;
+    else if (currentSelected !== 'ALL') targetSelect.value = currentSelected;
+  }
+  if (batchTargetSelect) {
+    var prevVal2 = batchTargetSelect.value;
+    batchTargetSelect.innerHTML = optionsHtml;
+    if (prevVal2) batchTargetSelect.value = prevVal2;
+    else if (currentSelected !== 'ALL') batchTargetSelect.value = currentSelected;
+  }
+}
+
+function handleRMSelectHub(storeId) {
+  cachedRegionalManagerData.selectedStoreId = storeId;
+  cachedRegionalManagerData.dateAttendance.filterStoreId = storeId;
+  renderRMHubSelector();
+
+  var feed = document.getElementById('rm-logs-feed');
+  if (feed) feed.innerHTML = '<div class="ui-loading-box"><span class="ui-spinner"></span><span>Filtering cluster ledger...</span></div>';
+
+  fetchDateGroupedDataForRegionalManager();
+  renderRMRosterTable();
+}
+
+function handleRMDatePreset(preset) {
+  var range = getDatePresetRange(preset);
+  var startInput = document.getElementById('rm-filter-start-date');
+  var endInput = document.getElementById('rm-filter-end-date');
+  if (startInput) startInput.value = range.start;
+  if (endInput) endInput.value = range.end;
+
+  cachedRegionalManagerData.dateAttendance.startDate = range.start;
+  cachedRegionalManagerData.dateAttendance.endDate = range.end;
+
+  // Update active class on preset pills in logs tab
+  var parentRow = document.querySelector('#rm-tab-logs .preset-pills-row');
+  if (parentRow) {
+    var pills = parentRow.querySelectorAll('.preset-pill');
+    pills.forEach(function(p) {
+      var txt = p.textContent.trim().toUpperCase();
+      var targetTxt = (preset === 'WEEK' ? 'THIS WEEK' : preset === 'MONTH' ? 'THIS MONTH' : preset === 'ALL' ? 'ALL TIME' : preset);
+      if (txt === targetTxt) {
+        p.classList.add('active');
+      } else {
+        p.classList.remove('active');
+      }
+    });
+  }
+
+  fetchDateGroupedDataForRegionalManager();
+}
+
+function handleRMDateRangeChange() {
+  var startInput = document.getElementById('rm-filter-start-date');
+  var endInput = document.getElementById('rm-filter-end-date');
+  cachedRegionalManagerData.dateAttendance.startDate = startInput ? startInput.value : '';
+  cachedRegionalManagerData.dateAttendance.endDate = endInput ? endInput.value : '';
+
+  // Clear active pills
+  var parentRow = document.querySelector('#rm-tab-logs .preset-pills-row');
+  if (parentRow) {
+    var pills = parentRow.querySelectorAll('.preset-pill');
+    pills.forEach(function(p) { p.classList.remove('active'); });
+  }
+
+  fetchDateGroupedDataForRegionalManager();
+}
+
+function handleRMSortChange() {
+  var sel = document.getElementById('rm-sort-select');
+  if (!sel) return;
+  var val = sel.value;
+  var parts = val.split('_');
+  cachedRegionalManagerData.dateAttendance.sortKey = parts[0];
+  cachedRegionalManagerData.dateAttendance.sortOrder = parts[1];
+  fetchDateGroupedDataForRegionalManager();
+}
+
+function handleRMSearchChange() {
+  var input = document.getElementById('rm-search-logs');
+  cachedRegionalManagerData.dateAttendance.searchQuery = input ? input.value : '';
+  renderRMDateFeed();
+}
+
+function fetchDateGroupedDataForRegionalManager() {
+  var feed = document.getElementById('rm-logs-feed');
+  if (feed) feed.innerHTML = '<div class="ui-loading-box"><span class="ui-spinner"></span><span>Loading cluster attendance ledger...</span></div>';
+
+  var callerEmail = getCurrentUserEmail();
+  var payload = {
+    callerEmail: callerEmail,
+    filterStoreId: cachedRegionalManagerData.selectedStoreId || 'ALL',
+    startDate: cachedRegionalManagerData.dateAttendance.startDate,
+    endDate: cachedRegionalManagerData.dateAttendance.endDate,
+    sortKey: cachedRegionalManagerData.dateAttendance.sortKey || 'TIME',
+    sortOrder: cachedRegionalManagerData.dateAttendance.sortOrder || 'DESC'
+  };
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (resp && resp.success) {
+        cachedRegionalManagerData.assignedStores = resp.assignedStores || cachedRegionalManagerData.assignedStores;
+        cachedRegionalManagerData.kpis = resp.kpis;
+        if (resp.dateAttendance && resp.dateAttendance.dateGroups) {
+          cachedRegionalManagerData.dateAttendance.dateGroups = resp.dateAttendance.dateGroups;
+        }
+        cachedRegionalManagerData.roster = resp.roster || cachedRegionalManagerData.roster;
+        
+        // Update KPI tiles
+        var kpis = resp.kpis || { totalStaff: 0, checkedInToday: 0, activeOnDuty: 0 };
+        var kpiOnDuty = document.getElementById('rm-kpi-onduty');
+        var kpiCheckedIn = document.getElementById('rm-kpi-checkedin');
+        var kpiTotalStaff = document.getElementById('rm-kpi-totalstaff');
+        if (kpiOnDuty) kpiOnDuty.textContent = kpis.activeOnDuty || 0;
+        if (kpiCheckedIn) kpiCheckedIn.textContent = kpis.checkedInToday || 0;
+        if (kpiTotalStaff) kpiTotalStaff.textContent = kpis.totalStaff || (cachedRegionalManagerData.roster ? cachedRegionalManagerData.roster.length : 0);
+
+        renderRMDateFeed();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Failed to load attendance: " + (err.message || err), "error");
+    })
+    .getRegionalManagerDashboardData(payload);
+}
+
+function renderRMDateFeed() {
+  var feedEl = document.getElementById('rm-logs-feed');
+  var groups = (cachedRegionalManagerData.dateAttendance && cachedRegionalManagerData.dateAttendance.dateGroups) || [];
+  var query = cachedRegionalManagerData.dateAttendance.searchQuery || '';
+  renderDateGroupedAccordion(groups, feedEl, 'rm', query);
+}
+
+function handleRMRosterSearchChange() {
+  var input = document.getElementById('rm-roster-search');
+  cachedRegionalManagerData.rosterSearchQuery = input ? input.value : '';
+  renderRMRosterTable();
+}
+
+function renderRMRosterTable() {
+  var listEl = document.getElementById('rm-roster-list');
+  if (!listEl) return;
+
+  var roster = cachedRegionalManagerData.roster || [];
+  var selectedHub = cachedRegionalManagerData.selectedStoreId || 'ALL';
+  var query = String(cachedRegionalManagerData.rosterSearchQuery || '').trim().toLowerCase();
+
+  var filtered = roster.filter(function(u) {
+    var matchHub = (selectedHub === 'ALL' || u.assignedStoreId === selectedHub);
+    var matchQuery = !query ||
+      (u.fullName && u.fullName.toLowerCase().indexOf(query) > -1) ||
+      (u.email && u.email.toLowerCase().indexOf(query) > -1) ||
+      (u.employeeCode && u.employeeCode.toLowerCase().indexOf(query) > -1);
+    return matchHub && matchQuery;
+  });
+
+  if (filtered.length === 0) {
+    listEl.innerHTML = '<div style="text-align: center; padding: 2rem; font-size: 0.82rem; color: var(--text-muted);">No personnel found matching the filter.</div>';
+    return;
+  }
+
+  var stores = cachedRegionalManagerData.assignedStores || [];
+  var html = '';
+  filtered.forEach(function(u) {
+    var store = stores.find(function(s) { return s.storeId === u.assignedStoreId; });
+    var storeName = store ? formatStoreName(store.storeName) : (u.assignedStoreId || 'Unassigned');
+    var isSuperAdmin = (u.role === 'SUPER_ADMIN');
+    var isHubManager = (u.role === 'STORE_ADMIN' || (u.employeeCode && u.employeeCode.indexOf('MGR') > -1) || (u.designation && u.designation.toUpperCase().indexOf('MANAGER') > -1));
+    var roleBadge = isSuperAdmin
+      ? '<span class="badge-role badge-role-super" style="background:#0F172A;color:#FFFFFF;font-weight:700;">SUPER ADMIN</span>'
+      : (isHubManager
+        ? '<span class="badge-role badge-role-mgr">HUB MANAGER</span>'
+        : '<span class="badge-role badge-role-user">STAFF</span>');
+
+    var actionHtml = isSuperAdmin
+      ? '<span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500; padding: 0.2rem 0;">Protected (Super Admin)</span>'
+      : '<button type="button" class="btn-danger btn-xs" onclick="handleRMRemoveStaff(\'' + escapeHtml(u.email) + '\', \'' + escapeHtml(u.assignedStoreId) + '\')">Remove from Hub</button>';
+
+    html += 
+      '<div class="activity-card-item" style="background: var(--bg-card);">' +
+        '<div class="activity-row-top">' +
+          '<div class="activity-store-name"><strong>' + escapeHtml(u.fullName || 'Employee') + '</strong> <span style="font-size: 0.75rem; color: var(--text-muted);">(' + escapeHtml(u.employeeCode || 'STAFF') + ')</span></div>' +
+          roleBadge +
+        '</div>' +
+        '<div style="font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 0.4rem; line-height: 1.4;">' +
+          escapeHtml(u.email) + ' · <span class="store-cell-badge">' + escapeHtml(storeName) + '</span>' +
+        '</div>' +
+        '<div style="display: flex; gap: 0.4rem; justify-content: flex-end; margin-top: 0.5rem; align-items: center;">' +
+          actionHtml +
+        '</div>' +
+      '</div>';
+  });
+
+  listEl.innerHTML = html;
+}
+
+function handleRMAddSingleStaff(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  var targetHub = document.getElementById('rm-add-target-hub').value;
+  var email = document.getElementById('rm-add-staff-email').value;
+  var name = document.getElementById('rm-add-staff-name').value;
+  var code = document.getElementById('rm-add-staff-code').value;
+  var roleDesignation = document.getElementById('rm-add-staff-role').value;
+  var btn = document.getElementById('btn-rm-add-staff-submit');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (!targetHub) {
+    showToast("Please select a target Mother Hub.", "error");
+    return;
+  }
+  if (!email || email.indexOf('@') === -1) {
+    showToast("Please enter a valid corporate email.", "error");
+    return;
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Adding to Roster...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add to Hub Roster';
+      }
+      showToast("Personnel added to Mother Hub roster.", "success");
+      document.getElementById('rm-add-staff-email').value = '';
+      document.getElementById('rm-add-staff-name').value = '';
+      document.getElementById('rm-add-staff-code').value = '';
+
+      if (resp && resp.success) {
+        cachedRegionalManagerData.roster = resp.roster || cachedRegionalManagerData.roster;
+        cachedRegionalManagerData.kpis = resp.kpis || cachedRegionalManagerData.kpis;
+        renderRegionalManagerUI();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Add to Hub Roster';
+      }
+      showToast("Failed to add personnel: " + (err.message || err), "error");
+    })
+    .addSingleStaffToHub({
+      callerEmail: callerEmail,
+      storeId: targetHub,
+      email: email,
+      fullName: name,
+      employeeCode: code,
+      designation: roleDesignation
+    });
+}
+
+function handleRMRemoveStaff(staffEmail, storeId) {
+  var cleanTargetEmail = String(staffEmail).trim().toLowerCase();
+  var target = (cachedRegionalManagerData.roster || []).find(function(r) {
+    return String(r.email).trim().toLowerCase() === cleanTargetEmail;
+  });
+  if (target && target.role === 'SUPER_ADMIN') {
+    showToast("Permission denied: Super Admin is the top-level authority and cannot be removed.", "error");
+    return;
+  }
+
+  if (!confirm("Are you sure you want to remove " + staffEmail + " from this Mother Hub?")) return;
+  var callerEmail = getCurrentUserEmail();
+  showToast("Removing personnel...", "info");
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      showToast("Personnel removed from roster.", "success");
+      if (resp && resp.success) {
+        cachedRegionalManagerData.roster = resp.roster || cachedRegionalManagerData.roster;
+        cachedRegionalManagerData.kpis = resp.kpis || cachedRegionalManagerData.kpis;
+        renderRegionalManagerUI();
+      }
+    })
+    .withFailureHandler(function(err) {
+      showToast("Error removing personnel: " + (err.message || err), "error");
+    })
+    .removeStaffFromHub({
+      callerEmail: callerEmail,
+      storeId: storeId,
+      email: staffEmail
+    });
+}
+
+function openRMBatchUploadModal() {
+  var modal = document.getElementById('modal-rm-batch-upload');
+  var targetSelect = document.getElementById('rm-batch-target-hub');
+  var currentSelected = cachedRegionalManagerData.selectedStoreId || 'ALL';
+
+  if (targetSelect && currentSelected !== 'ALL') {
+    targetSelect.value = currentSelected;
+  }
+  document.getElementById('rm-batch-roster-text').value = '';
+
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeRMBatchUploadModal() {
+  var modal = document.getElementById('modal-rm-batch-upload');
+  if (modal) modal.classList.add('hidden');
+}
+
+function handleRMSubmitBatchRoster(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  var targetHub = document.getElementById('rm-batch-target-hub').value;
+  var rawText = document.getElementById('rm-batch-roster-text').value;
+  var btn = document.getElementById('btn-rm-batch-submit');
+  var origText = btn ? btn.textContent : '';
+  var callerEmail = getCurrentUserEmail();
+
+  if (!targetHub) {
+    showToast("Please select a target Mother Hub.", "error");
+    return;
+  }
+  if (!rawText.trim()) {
+    showToast("Please paste CSV roster entries.", "error");
+    return;
+  }
+
+  // Parse lines
+  var lines = rawText.split('\n');
+  var rosterRows = [];
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line) continue;
+    var parts = line.split(',');
+    if (parts.length >= 1) {
+      var email = parts[0].trim().toLowerCase();
+      if (!email || email.indexOf('@') === -1) continue;
+      var name = parts.length > 1 ? parts[1].trim() : '';
+      var code = parts.length > 2 ? parts[2].trim() : '';
+      var desig = parts.length > 3 ? parts[3].trim().toUpperCase() : 'STAFF';
+      rosterRows.push({
+        email: email,
+        fullName: name,
+        employeeCode: code,
+        designation: desig
+      });
+    }
+  }
+
+  if (rosterRows.length === 0) {
+    showToast("No valid email addresses found in the pasted data.", "error");
+    return;
+  }
+
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('btn-loading');
+    btn.textContent = 'Uploading ' + rosterRows.length + ' Personnel...';
+  }
+
+  google.script.run
+    .withSuccessHandler(function(resp) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Upload & Provision Roster';
+      }
+      closeRMBatchUploadModal();
+      showToast("Roster provisioned successfully (" + (resp.processedCount || rosterRows.length) + " personnel).", "success");
+
+      if (resp && resp.success) {
+        cachedRegionalManagerData.roster = resp.roster || cachedRegionalManagerData.roster;
+        cachedRegionalManagerData.kpis = resp.kpis || cachedRegionalManagerData.kpis;
+        renderRegionalManagerUI();
+      }
+    })
+    .withFailureHandler(function(err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('btn-loading');
+        btn.textContent = origText || 'Upload & Provision Roster';
+      }
+      showToast("Failed to upload roster: " + (err.message || err), "error");
+    })
+    .uploadHubRoster({
+      callerEmail: callerEmail,
+      storeId: targetHub,
+      rosterRows: rosterRows
+    });
 }
 
 /* ==========================================================================

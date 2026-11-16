@@ -11,13 +11,14 @@ window.AppState = (function() {
     isInitialized: false,
     isRegistered: false,
     currentUser: null,
-    currentRole: 'USER', // 'USER' | 'STORE_ADMIN' | 'SUPER_ADMIN'
-    activeTab: 'punch',  // 'punch' | 'team' | 'manage'
+    currentRole: 'USER', // 'USER' | 'REGIONAL_MANAGER' | 'SUPER_ADMIN'
+    activeTab: 'punch',  // 'punch' | 'attendance' | 'roster'
     
     // Stores
     stores: [],
     allStores: [],       // Super Admin global stores
-    assignedStore: null, // Hard-locked store for USER and STORE_ADMIN
+    assignedStores: [],  // Regional Manager assigned stores (Many-to-Many)
+    assignedStore: null, // Hard-locked store for USER
     selectedStoreId: null,
 
     // Geolocation & Device
@@ -139,12 +140,32 @@ window.AppState = (function() {
     };
   }
 
+  function setShiftStatus(shiftStatus) {
+    setState(function(s) { s.shiftStatus = shiftStatus; });
+  }
+
+  function setPairedHistory(history) {
+    setState(function(s) { s.pairedHistory = history; });
+  }
+
+  function setDateAttendance(dateAtt) {
+    setState(function(s) { s.dateAttendance = dateAtt; });
+  }
+
+  function setAssignedStores(storesList) {
+    setState(function(s) { s.assignedStores = storesList; });
+  }
+
   return {
     getState: getState,
     setState: setState,
     subscribe: subscribe,
     getSelectedStore: getSelectedStore,
-    getSelectedHub: getSelectedHub
+    getSelectedHub: getSelectedHub,
+    setShiftStatus: setShiftStatus,
+    setPairedHistory: setPairedHistory,
+    setDateAttendance: setDateAttendance,
+    setAssignedStores: setAssignedStores
   };
 })();
 </script>

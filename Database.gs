@@ -14,7 +14,8 @@ const Database = {
 
   STORES_HEADERS: [
     "Store_ID", "Store_Name", "Latitude", "Longitude", "Radius_Meters",
-    "Primary_Admin_Email", "Status", "Created_By", "Created_At", "Manager_Emails"
+    "Primary_Admin_Email", "Status", "Created_By", "Created_At", "Manager_Emails",
+    "Regional_Manager_Emails", "Region_Name"
   ],
 
   USERS_HEADERS: [
@@ -416,6 +417,11 @@ const Database = {
         const storeId = String(row[0]).trim();
         const primaryEmail = String(row[5] || "").trim().toLowerCase();
         const managerEmailsRaw = String(row[9] || "").trim();
+        const regionalManagerEmailsRaw = String(row[10] || "").trim();
+        const regionalManagerEmails = regionalManagerEmailsRaw
+          ? regionalManagerEmailsRaw.split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+          : [];
+        const regionName = String(row[11] || "").trim();
         const managers = this.getStoreManagers(storeId, primaryEmail);
 
         stores.push({
@@ -426,6 +432,9 @@ const Database = {
           radiusMeters: Number(row[4]) || 100,
           primaryAdminEmail: primaryEmail,
           managerEmails: managerEmailsRaw,
+          regionalManagerEmails: regionalManagerEmails,
+          regionalManagerEmailsRaw: regionalManagerEmailsRaw,
+          regionName: regionName,
           managers: managers,
           status: isInactive ? "INACTIVE" : "ACTIVE",
           createdBy: String(row[7] || ""),
@@ -462,6 +471,11 @@ const Database = {
         const storeId = String(data[i][0]).trim();
         const primaryEmail = String(data[i][5] || "").trim().toLowerCase();
         const managerEmailsRaw = String(data[i][9] || "").trim();
+        const regionalManagerEmailsRaw = String(data[i][10] || "").trim();
+        const regionalManagerEmails = regionalManagerEmailsRaw
+          ? regionalManagerEmailsRaw.split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+          : [];
+        const regionName = String(data[i][11] || "").trim();
         const managers = this.getStoreManagers(storeId, primaryEmail);
 
         return {
@@ -473,6 +487,9 @@ const Database = {
           radiusMeters: Number(data[i][4]) || 100,
           primaryAdminEmail: primaryEmail,
           managerEmails: managerEmailsRaw,
+          regionalManagerEmails: regionalManagerEmails,
+          regionalManagerEmailsRaw: regionalManagerEmailsRaw,
+          regionName: regionName,
           managers: managers,
           status: isInactive ? "INACTIVE" : "ACTIVE",
           createdBy: String(data[i][7] || ""),
@@ -650,6 +667,342 @@ const Database = {
     const managers = this.getStoreManagers(store.storeId);
     const emailList = managers.map(m => m.email).join(", ");
     sheet.getRange(store.rowIndex, colIdx).setValue(emailList);
+  },
+
+  /**
+   * Retrieves all stores assigned to a Regional Manager (Many-to-Many)
+   */
+  getStoresForRegionalManager: function(rmEmail) {
+    if (!rmEmail) return [];
+    const cleanEmail = String(rmEmail).trim().toLowerCase();
+    const allStores = this.getActiveStores();
+    return allStores.filter(s => {
+      if (s.regionalManagerEmails && s.regionalManagerEmails.includes(cleanEmail)) return true;
+      if (s.primaryAdminEmail && s.primaryAdminEmail === cleanEmail) return true;
+      return false;
+    });
+  },
+
+  /**
+   * Retrieves all Regional Managers assigned to a specific store
+   */
+  getStoreRegionalManagers: function(storeId) {
+    const store = this.getStoreById(storeId);
+    if (!store) return [];
+    const emails = store.regionalManagerEmails || [];
+    const allUsers = this.getAllUsers();
+    const userMap = {};
+    allUsers.forEach(u => {
+      userMap[String(u.email).trim().toLowerCase()] = u;
+    });
+
+    return emails.map(email => {
+      const u = userMap[email];
+      return {
+        email: email,
+        fullName: u ? u.fullName : email,
+        employeeCode: u ? u.employeeCode : "RM",
+        role: "REGIONAL_MANAGER",
+        status: u ? u.status : "ACTIVE"
+      };
+    });
+  },
+
+  /**
+   * Adds a Regional Manager to a Store (Many-to-Many)
+   */
+  addStoreRegionalManager: function(storeId, rmEmail, rmName, rmCode, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const cleanEmail = String(rmEmail).trim().toLowerCase();
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found: " + storeId);
+
+      // Ensure user exists as REGIONAL_MANAGER
+      let user = this.findUserByEmail(cleanEmail);
+      if (user) {
+        if (user.role !== "SUPER_ADMIN") {
+          this.updateUser(cleanEmail, {
+            role: "REGIONAL_MANAGER",
+            fullName: rmName ? rmName.trim() : user.fullName,
+            status: "ACTIVE"
+          });
+        }
+      } else {
+        const empCode = rmCode ? rmCode.trim().toUpperCase() : ("RM-" + Math.floor(1000 + Math.random() * 9000));
+        this.insertUser({
+          email: cleanEmail,
+          fullName: rmName ? rmName.trim() : "Regional Manager",
+          employeeCode: empCode,
+          role: "REGIONAL_MANAGER",
+          assignedStoreId: store.storeId,
+          reportingManagerEmail: callerEmail || "",
+          status: "ACTIVE"
+        });
+      }
+
+      // Update store's Regional_Manager_Emails
+      const currentList = store.regionalManagerEmails ? [...store.regionalManagerEmails] : [];
+      if (!currentList.includes(cleanEmail)) {
+        currentList.push(cleanEmail);
+      }
+
+      const sheet = this.getTab(this.TAB_STORES);
+      const lastCol = sheet.getLastColumn();
+      const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+      let colIdx = headers.indexOf("Regional_Manager_Emails") + 1;
+      if (colIdx <= 0) {
+        sheet.getRange(1, lastCol + 1).setValue("Regional_Manager_Emails");
+        colIdx = lastCol + 1;
+      }
+
+      sheet.getRange(store.rowIndex, colIdx).setValue(currentList.join(", "));
+      return this.getStoreById(store.storeId);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Removes a Regional Manager from a Store
+   */
+  removeStoreRegionalManager: function(storeId, rmEmail, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const cleanEmail = String(rmEmail).trim().toLowerCase();
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found: " + storeId);
+
+      const currentList = store.regionalManagerEmails ? [...store.regionalManagerEmails] : [];
+      const updatedList = currentList.filter(e => e !== cleanEmail);
+
+      const sheet = this.getTab(this.TAB_STORES);
+      const lastCol = sheet.getLastColumn();
+      const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+      let colIdx = headers.indexOf("Regional_Manager_Emails") + 1;
+      if (colIdx <= 0) {
+        sheet.getRange(1, lastCol + 1).setValue("Regional_Manager_Emails");
+        colIdx = lastCol + 1;
+      }
+
+      sheet.getRange(store.rowIndex, colIdx).setValue(updatedList.join(", "));
+      return this.getStoreById(store.storeId);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Sets the full list of Regional Managers for a Store
+   */
+  setStoreRegionalManagers: function(storeId, rmEmailsList) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found: " + storeId);
+
+      const cleanList = Array.isArray(rmEmailsList) 
+        ? rmEmailsList.map(e => String(e).trim().toLowerCase()).filter(Boolean)
+        : String(rmEmailsList || "").split(',').map(e => String(e).trim().toLowerCase()).filter(Boolean);
+
+      const sheet = this.getTab(this.TAB_STORES);
+      const lastCol = sheet.getLastColumn();
+      const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+      let colIdx = headers.indexOf("Regional_Manager_Emails") + 1;
+      if (colIdx <= 0) {
+        sheet.getRange(1, lastCol + 1).setValue("Regional_Manager_Emails");
+        colIdx = lastCol + 1;
+      }
+
+      sheet.getRange(store.rowIndex, colIdx).setValue(cleanList.join(", "));
+      return this.getStoreById(store.storeId);
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Batch upsert staff roster for a Mother Hub (Exclusively invoked by RM or Super Admin)
+   */
+  batchUpsertHubRoster: function(storeId, rosterRows, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(15000);
+    } catch (e) {}
+
+    try {
+      const store = this.getStoreById(storeId);
+      if (!store) throw new Error("Store not found: " + storeId);
+
+      if (!Array.isArray(rosterRows) || rosterRows.length === 0) {
+        throw new Error("No roster entries provided for upload.");
+      }
+
+      let upsertCount = 0;
+      const hubManagerEmails = [];
+
+      rosterRows.forEach((row, idx) => {
+        if (!row.email) return;
+        const cleanEmail = String(row.email).trim().toLowerCase();
+        if (!cleanEmail || cleanEmail.indexOf('@') === -1) return;
+
+        const fullName = String(row.fullName || row.name || cleanEmail.split('@')[0]).trim();
+        const empCode = String(row.employeeCode || row.empCode || ("EMP-" + Math.floor(1000 + Math.random() * 9000))).trim().toUpperCase();
+        const isManager = String(row.designation || row.role || "").toUpperCase().indexOf("MGR") > -1 || String(row.designation || "").toUpperCase().indexOf("MANAGER") > -1;
+
+        if (isManager) {
+          hubManagerEmails.push(cleanEmail);
+        }
+
+        const existing = this.findUserByEmail(cleanEmail);
+        if (existing) {
+          if (existing.role === 'SUPER_ADMIN') {
+            // Top-level Super Admin cannot be downgraded or altered by Regional Manager roster uploads
+            return;
+          }
+          this.updateUser(cleanEmail, {
+            fullName: fullName,
+            employeeCode: empCode,
+            assignedStoreId: store.storeId,
+            role: "USER", // All hub staff and hub managers are role USER!
+            status: "ACTIVE"
+          });
+        } else {
+          this.insertUser({
+            email: cleanEmail,
+            fullName: fullName,
+            employeeCode: empCode,
+            role: "USER", // All hub staff and hub managers are role USER!
+            assignedStoreId: store.storeId,
+            reportingManagerEmail: callerEmail || "",
+            status: "ACTIVE"
+          });
+        }
+        upsertCount++;
+      });
+
+      // Update store manager emails if any manager designations were provided
+      if (hubManagerEmails.length > 0) {
+        const sheet = this.getTab(this.TAB_STORES);
+        const existingMgrs = store.managerEmails ? store.managerEmails.split(',').map(e => e.trim().toLowerCase()) : [];
+        const mergedMgrs = Array.from(new Set([...existingMgrs, ...hubManagerEmails]));
+        sheet.getRange(store.rowIndex, 10).setValue(mergedMgrs.join(", "));
+      }
+
+      return {
+        success: true,
+        count: upsertCount,
+        storeId: store.storeId,
+        storeName: store.storeName
+      };
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Adds a single staff member or manager to a Mother Hub
+   */
+  addSingleStaffToHub: function(storeId, email, fullName, employeeCode, designation, callerEmail) {
+    return this.batchUpsertHubRoster(storeId, [{
+      email: email,
+      fullName: fullName,
+      employeeCode: employeeCode,
+      designation: designation
+    }], callerEmail);
+  },
+
+  /**
+   * Removes or deactivates a staff member from a Mother Hub
+   */
+  removeStaffFromHub: function(storeId, email, callerEmail) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (e) {}
+
+    try {
+      const cleanEmail = String(email).trim().toLowerCase();
+      const user = this.findUserByEmail(cleanEmail);
+      if (user) {
+        if (user.role === 'SUPER_ADMIN') {
+          throw new Error("Super Admin is the top-level authority and cannot be removed from any Mother Hub.");
+        }
+        this.updateUser(cleanEmail, {
+          assignedStoreId: "",
+          status: "INACTIVE"
+        });
+      }
+      return { success: true, email: cleanEmail };
+    } finally {
+      lock.releaseLock();
+    }
+  },
+
+  /**
+   * Aggregates KPIs across multiple Mother Hubs for a Regional Manager
+   */
+  getRegionalAggregatedKpis: function(storeIds) {
+    const validStoreIds = (Array.isArray(storeIds) ? storeIds : [storeIds]).map(id => String(id).trim().toUpperCase());
+    const allUsers = this.getAllUsers();
+    const todayStr = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd");
+
+    let totalStaff = 0;
+    const storeStaffEmails = new Set();
+    allUsers.forEach(u => {
+      const uStore = String(u.assignedStoreId || "").trim().toUpperCase();
+      if (validStoreIds.includes(uStore) && u.status === 'ACTIVE') {
+        totalStaff++;
+        storeStaffEmails.add(String(u.email).trim().toLowerCase());
+      }
+    });
+
+    const sheet = this.getTab(this.TAB_LOGS);
+    const data = sheet.getDataRange().getValues();
+    const checkedInEmails = new Set();
+    const checkedOutEmails = new Set();
+    const latestUserStatus = {};
+
+    for (let i = 1; i < data.length; i++) {
+      const logStoreId = String(data[i][5] || "").trim().toUpperCase();
+      if (!validStoreIds.includes(logStoreId)) continue;
+
+      const email = String(data[i][2] || "").trim().toLowerCase();
+      const ts = String(data[i][1] || "");
+      const checkType = String(data[i][8] || "").trim().toUpperCase();
+
+      if (ts.startsWith(todayStr)) {
+        if (checkType === 'CHECK_IN') checkedInEmails.add(email);
+        if (checkType === 'CHECK_OUT') checkedOutEmails.add(email);
+        latestUserStatus[email] = checkType;
+      }
+    }
+
+    let onDutyNow = 0;
+    Object.keys(latestUserStatus).forEach(e => {
+      if (latestUserStatus[e] === 'CHECK_IN') onDutyNow++;
+    });
+
+    return {
+      managedHubsCount: validStoreIds.length,
+      totalStaff: totalStaff,
+      checkedInToday: checkedInEmails.size,
+      checkedOutToday: checkedOutEmails.size,
+      onDutyNow: onDutyNow,
+      absentToday: Math.max(0, totalStaff - checkedInEmails.size)
+    };
   },
 
   /**
@@ -1159,7 +1512,22 @@ const Database = {
         if (!filterStoreId || filterStoreId === "ALL" || logStoreId === filterStoreId) {
           isAllowed = true;
         }
-      } else if (callerRole === "STORE_ADMIN") {
+      } else if (callerRole === "REGIONAL_MANAGER") {
+        const allowedStores = Array.isArray(callerStoreId) 
+          ? callerStoreId.map(s => String(s).trim().toUpperCase()) 
+          : String(callerStoreId || "").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        
+        if (filterStoreId && filterStoreId !== "ALL") {
+          const filterNorm = String(filterStoreId).trim().toUpperCase();
+          if (allowedStores.includes(filterNorm) && logStoreId.toUpperCase() === filterNorm) {
+            isAllowed = true;
+          }
+        } else {
+          if (allowedStores.includes(logStoreId.toUpperCase())) {
+            isAllowed = true;
+          }
+        }
+      } else if (callerRole === "STORE_ADMIN" || callerRole === "USER") {
         if (logStoreId === callerStoreId || logManagerEmail === callerEmailNorm) {
           isAllowed = true;
         }
@@ -1462,6 +1830,13 @@ const Database = {
 
       if (callerRole === "SUPER_ADMIN") {
         isAllowed = true;
+      } else if (callerRole === "REGIONAL_MANAGER") {
+        const allowedStores = Array.isArray(callerStoreId) 
+          ? callerStoreId.map(s => String(s).trim().toUpperCase()) 
+          : String(callerStoreId || "").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        if (allowedStores.includes(userStoreId.toUpperCase()) || userManager === callerEmailNorm) {
+          isAllowed = true;
+        }
       } else if (callerRole === "STORE_ADMIN") {
         if (userManager === callerEmailNorm || userStoreId === callerStoreId) {
           isAllowed = true;

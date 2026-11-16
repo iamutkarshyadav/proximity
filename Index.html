@@ -92,11 +92,11 @@
           </button>
         </div>
 
-        <!-- Role 1: Ground Staff Check-In UI (ONLY role that marks attendance) -->
+        <!-- Role 1: Ground Staff & Hub Managers Check-In UI (Punches attendance) -->
         <?!= include('UserDashboard'); ?>
 
-        <!-- Role 2: Store Admin Dashboard (Scoped Single-Store Monitoring & Staff Roster) -->
-        <?!= include('StoreAdminDashboard'); ?>
+        <!-- Role 2: Regional Manager Dashboard (Multi-Hub Cluster Operations & Roster Upload) -->
+        <?!= include('RegionalManagerDashboard'); ?>
 
         <!-- Role 3: Super Admin Dashboard (Master Control, Global Feed & CRUD) -->
         <?!= include('SuperAdminDashboard'); ?>
@@ -179,6 +179,98 @@
         </div>
         <div class="modal-footer">
           <button type="button" class="btn-secondary btn-sm" onclick="closeChangeAdminModal()">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Manage Regional Managers for Store (Super Admin) -->
+    <div id="modal-manage-rms" class="modal-backdrop hidden" onclick="if(event.target===this) closeManageRMsModal()">
+      <div class="modal-dialog modal-dialog-sm">
+        <div class="modal-header">
+          <div class="modal-title" id="manage-rms-store-title">Manage Regional Managers</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closeManageRMsModal()">Close</button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="manage-rms-store-id">
+          
+          <!-- Assigned Regional Managers List -->
+          <div style="margin-bottom: 1rem;">
+            <label class="ui-label">Assigned Regional Managers</label>
+            <div id="manage-rms-list" class="manage-managers-list">
+              <div style="font-size: 0.8rem; color: var(--text-muted);">Loading regional managers...</div>
+            </div>
+          </div>
+
+          <!-- Assign New Regional Manager Form -->
+          <div style="border-top: 1px solid var(--border-subtle); padding-top: 0.85rem;">
+            <div style="font-size: 0.82rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.5rem;">
+              Assign Regional Manager
+            </div>
+            <form id="form-assign-rm" onsubmit="handleSuperAdminAssignRM(event)">
+              <div style="margin-bottom: 0.5rem;">
+                <label class="ui-label" for="assign-rm-email">RM Corporate Email</label>
+                <input type="email" id="assign-rm-email" class="ui-input" placeholder="rm@company.com" required>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 0.75rem;">
+                <div>
+                  <label class="ui-label" for="assign-rm-name">Full Name</label>
+                  <input type="text" id="assign-rm-name" class="ui-input" placeholder="e.g. Anand Varma">
+                </div>
+                <div>
+                  <label class="ui-label" for="assign-rm-code">Emp ID</label>
+                  <input type="text" id="assign-rm-code" class="ui-input" placeholder="e.g. RM-101">
+                </div>
+              </div>
+              <button type="submit" id="btn-save-assign-rm" class="btn-primary btn-sm" style="width: 100%;">
+                Assign Regional Manager
+              </button>
+            </form>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary btn-sm" onclick="closeManageRMsModal()">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Regional Manager Batch Roster Upload -->
+    <div id="modal-rm-batch-upload" class="modal-backdrop hidden" onclick="if(event.target===this) closeRMBatchUploadModal()">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div class="modal-title">Batch Upload Hub Roster</div>
+          <button type="button" class="btn-secondary btn-sm" onclick="closeRMBatchUploadModal()">Close</button>
+        </div>
+        <div class="modal-body">
+          <form id="form-rm-batch-upload" onsubmit="handleRMSubmitBatchRoster(event)">
+            <div style="margin-bottom: 0.75rem;">
+              <label class="ui-label" for="rm-batch-target-hub">Target Mother Hub</label>
+              <select id="rm-batch-target-hub" class="ui-select" required>
+                <option value="">Select Mother Hub...</option>
+              </select>
+            </div>
+
+            <div style="margin-bottom: 0.5rem;">
+              <label class="ui-label" for="rm-batch-roster-text">Personnel List (CSV / Comma-Separated)</label>
+              <div style="font-size: 0.72rem; color: var(--text-muted); margin-bottom: 0.35rem;">
+                Format per line: <code>Email, Full Name, Emp ID, Designation (STAFF or HUB_MANAGER)</code>
+              </div>
+              <textarea 
+                id="rm-batch-roster-text" 
+                class="ui-input" 
+                rows="8" 
+                style="font-family: var(--font-mono); font-size: 0.76rem; resize: vertical;"
+                placeholder="colleague1@gmail.com, Ramesh Singh, EMP-101, STAFF&#10;colleague2@gmail.com, Priya Sharma, EMP-102, STAFF&#10;manager1@gmail.com, Ajay Verma, MGR-001, HUB_MANAGER" 
+                required
+              ></textarea>
+            </div>
+
+            <button type="submit" id="btn-rm-batch-submit" class="btn-primary" style="margin-top: 0.5rem;">
+              Upload & Provision Roster
+            </button>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary btn-sm" onclick="closeRMBatchUploadModal()">Cancel</button>
         </div>
       </div>
     </div>
